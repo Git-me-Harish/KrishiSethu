@@ -5,8 +5,8 @@ import io
 import os
 
 # Get path relative to the current file
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_PATH = os.path.join(BASE_DIR, "CROP---Plant-Disease-Identification-Using-App-master", "Cnn-Code", "OutputFiles", "output.tflite")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "model", "output.tflite")
 
 CLASSES = [
     "Potato___Early_blight",
