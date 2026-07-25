@@ -1,0 +1,137 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Background colors */
+    --background: #f8fafc;
+    --foreground: #111827;
+    --card: #ffffff;
+    --card-foreground: #111827;
+    --muted: #f1f5f9;
+    --muted-foreground: #6c757d;
+
+    /* Brand colors */
+    --primary: #4caf50;
+    --primary-foreground: #ffffff;
+    --primary-dark: #1e293b;
+
+    /* Accent colors */
+    --accent: #ff9800;
+    --destructive: #dc2626;
+    --success: #4caf50;
+    --warning: #ffeb3b;
+    --info: #2563eb;
+
+    /* Borders and inputs */
+    --border: #e2e8f0;
+    --input: #e2e8f0;
+    --ring: #4caf50;
+
+    /* Radius */
+    --radius: 8px;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Focus visible — accessibility */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
+
+@layer components {
+  .container-page {
+    @apply mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8;
+  }
+
+  /* Button variants — matching the green primary CTA from reference UI */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-primary px-6 py-3 text-primary-foreground shadow-sm hover:bg-primary-700 hover:shadow-md active:scale-[0.98];
+  }
+
+  .btn-secondary {
+    @apply btn bg-white px-6 py-3 text-slate-800 border border-slate-200 shadow-sm hover:bg-slate-50 hover:border-slate-300 active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply btn px-4 py-2 text-slate-700 hover:bg-slate-100 hover:text-slate-900;
+  }
+
+  .btn-lg {
+    @apply px-8 py-4 text-base;
+  }
+
+  /* Card */
+  .card {
+    @apply rounded-lg border border-slate-200 bg-white shadow-sm transition-all hover:shadow-md;
+  }
+
+  /* Section heading */
+  .section-heading {
+    @apply text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl lg:text-5xl;
+  }
+
+  .section-subheading {
+    @apply mt-4 text-base text-slate-600 sm:text-lg;
+  }
+
+  /* Stat */
+  .stat-value {
+    @apply text-3xl font-bold text-slate-900 sm:text-4xl;
+  }
+
+  .stat-label {
+    @apply mt-1 text-sm text-slate-600;
+  }
+
+  /* NDVI color scale utility (matches reference UI) */
+  .ndvi-gradient {
+    background: linear-gradient(
+      to top,
+      #dc2626 0%,
+      #ff9800 25%,
+      #ffeb3b 50%,
+      #a5d6a7 75%,
+      #4caf50 100%
+    );
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* Subtle gradient overlays */
+  .bg-hero-overlay {
+    background: linear-gradient(
+      to bottom,
+      rgba(30, 41, 59, 0.4) 0%,
+      rgba(30, 41, 59, 0.7) 50%,
+      rgba(30, 41, 59, 0.9) 100%
+    );
+  }
+
+  .bg-section-dark {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+  }
+}

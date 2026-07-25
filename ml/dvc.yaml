@@ -1,0 +1,72 @@
+# DVC pipeline configuration for dataset versioning
+# 
+# Usage:
+#   dvc init
+#   dvc remote add -d storage s3://krishisetu-dvc/
+#   dvc add data/PlantVillage data/PlantDoc data/custom_indian
+#   dvc push
+#
+# This tracks dataset versions alongside code, ensuring full
+# reproducibility of training runs.
+
+stages:
+  prepare_dataset:
+    cmd: python -m ml.training.dataset_preparation
+      --plantvillage-path data/PlantVillage
+      --plantdoc-path data/PlantDoc
+      --custom-path data/custom_indian
+      --output-path data/processed
+    deps:
+      - data/PlantVillage
+      - data/PlantDoc
+      - data/custom_indian
+      - ml/training/dataset_preparation.py
+    outs:
+      - data/processed
+
+  train:
+    cmd: python -m ml.training.train_disease_classifier
+      --data-path data/processed
+      --output-path models/disease_classifier_v1
+    deps:
+      - data/processed
+      - ml/training/train_disease_classifier.py
+    outs:
+      - models/disease_classifier_v1
+
+  evaluate:
+    cmd: python -m ml.evaluation.evaluate_disease_classifier
+      --model-path models/disease_classifier_v1/best.pt
+      --data-path data/processed
+      --output-path models/disease_classifier_v1/evaluation
+    deps:
+      - models/disease_classifier_v1/best.pt
+      - data/processed
+      - ml/evaluation/evaluate_disease_classifier.py
+    metrics:
+      - models/disease_classifier_v1/evaluation/evaluation_results.json:
+          cache: false
+
+  calibrate:
+    cmd: python -m ml.training.calibrate
+      --model-path models/disease_classifier_v1/best.pt
+      --data-path data/processed
+      --output-path models/disease_classifier_v1/calibration.json
+    deps:
+      - models/disease_classifier_v1/best.pt
+      - data/processed
+      - ml/training/calibrate.py
+    metrics:
+      - models/disease_classifier_v1/calibration.json:
+          cache: false
+
+  export_onnx:
+    cmd: python -m ml.training.export_onnx
+      --model-path models/disease_classifier_v1/best.pt
+      --output-path models/disease_classifier_v1/model.onnx
+      --version v1.0.0
+    deps:
+      - models/disease_classifier_v1/best.pt
+      - ml/training/export_onnx.py
+    outs:
+      - models/disease_classifier_v1/model.onnx

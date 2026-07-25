@@ -1,0 +1,1 @@
+"""KrishiSetu core package."""

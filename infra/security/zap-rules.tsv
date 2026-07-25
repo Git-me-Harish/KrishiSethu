@@ -1,0 +1,75 @@
+# OWASP ZAP baseline scan rules configuration (TSV format)
+#
+# Format: <rule-id>\t<status>
+# Status: FAIL | WARN | INFO | IGNORE
+#
+# This file tunes ZAP's baseline scanner for the KrishiSetu API surface.
+# The API:
+# - Returns JSON only (no HTML/XSS surface)
+# - Uses Bearer JWT auth (no cookies for API; cookies only for refresh)
+# - Has its own CSP / HSTS / X-Frame-Options headers (verified by tests)
+# - Uses parameterized SQL (no SQLi surface)
+#
+# Rules that are noisy / irrelevant for our JSON API are set to IGNORE.
+# Rules that catch real misconfigurations are kept at FAIL or WARN.
+
+# ---------------------------------------------------------------------------
+# Headers — kept enabled, our middleware should pass all of these
+# ---------------------------------------------------------------------------
+10020	FAIL	# Anti-CSRF Tokens Check (we have our own double-submit)
+10021	FAIL	# X-Content-Type-Options Header Missing
+10017	FAIL	# Source Code Disclosure (rare but worth catching)
+10038	FAIL	# Content Security Policy (CSP) Header Not Set
+10010	FAIL	# Cookie No HttpOnly Flag
+10011	FAIL	# Cookie without Secure Flag
+10027	FAIL	# Information Disclosure — Suspicious Comments in Source
+10028	FAIL	# Open Redirect
+10029	FAIL	# Cookie Poisoning
+10032	FAIL	# Viewstate
+10037	FAIL	# Server Leaks Version Information via "Server" HTTP Response Header
+10040	FAIL	# Secure Pages Include Mixed Content
+10041	FAIL	# HTTP to HTTPS Insecure Redirect
+10042	FAIL	# Private IP Disclosure
+10043	FAIL	# Session ID in URL Rewrite
+10054	FAIL	# Cookie without SameSite Attribute
+10055	FAIL	# CSP Scanner: Wildcard Directive
+10056	FAIL	# X-Frame-Options Header Scanner
+10057	FAIL	# HTTPS Information Exposure
+10061	FAIL	# X-AspNet-Version Response Header
+10062	FAIL	# INFO: ASPEC Vulnerability
+10202	FAIL	# Absence of Anti-CSRF Tokens
+3	FAIL	# Session ID in URL Rewrite
+
+# ---------------------------------------------------------------------------
+# Rules we IGNORE (not applicable to a JSON-only API surface)
+# ---------------------------------------------------------------------------
+10024	IGNORE	# Private IP Disclosure (we expose 127.0.0.1 in dev)
+10025	IGNORE	# Cookie without Secure Flag (dev mode is HTTP)
+10096	IGNORE	# Timestamp Disclosure (we use Unix timestamps in JWTs)
+10098	IGNORE	# Cross-Domain JavaScript Source File
+10105	IGNORE	# Weak Authentication (we use JWT, ZAP can't detect)
+10109	IGNORE	# Modern App Without Scanner Detection
+10110	IGNORE	# Modern App Detection
+10266	IGNORE	# INFORMATION — 春雨 / Spring Rain Plugin
+20014	IGNORE	# Anti-CSRF Tokens Check (covered by 10020)
+20015	IGNORE	# Heartbleed OpenSSL Vulnerability (outdated, not applicable)
+20016	IGNORE	# Heartbleed OpenSSL Vulnerability (Indirect)
+20017	IGNORE	# Source Code Disclosure — Git
+20018	IGNORE	# Remote Code Execution — Shell Shock
+40008	IGNORE	# Cross Site Scripting (Reflected) — JSON API has no HTML surface
+40009	IGNORE	# Cross Site Scripting (Persistent) — same
+40012	IGNORE	# Cross Site Scripting (DOM-based) — same
+40018	IGNORE	# SQL Injection — Hypersonic (we use Postgres; parameterized)
+40019	IGNORE	# SQL Injection — Microsoft SQL Server
+40020	IGNORE	# SQL Injection — MySQL
+40021	IGNORE	# SQL Injection — Oracle
+40022	IGNORE	# SQL Injection — PostgreSQL (parameterized queries prevent this)
+40023	IGNORE	# SQL Injection — SQLite
+40024	IGNORE	# SQL Injection — Sybase
+40025	IGNORE	# SQL Injection — DB2
+
+# ---------------------------------------------------------------------------
+# Rules we explicitly WARN on (review but don't fail the build)
+# ---------------------------------------------------------------------------
+50000	WARN	# Script active scan rules
+50001	WARN	# Passive scan rules

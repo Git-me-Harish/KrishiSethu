@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "krishisetu-ml-inference"
+version = "0.1.0"
+description = "KrishiSetu ML Inference Microservice — ONNX Runtime model serving for crop disease classification"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+dependencies = [
+    # Web framework
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "python-multipart==0.0.20",
+
+    # ML inference
+    "onnxruntime==1.20.1",
+    "numpy==2.2.1",
+    "pillow==11.0.0",
+
+    # Image preprocessing
+    "opencv-python-headless==4.10.0.84",
+
+    # Object storage (for loading model artifacts)
+    "boto3==1.35.86",
+    "botocore==1.35.86",
+
+    # Config & validation
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.0",
+
+    # Logging
+    "structlog==24.4.0",
+
+    # HTTP client (for downloading models)
+    "httpx==0.28.1",
+
+    # Observability
+    "prometheus-client==0.21.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.0",
+    "httpx==0.28.1",
+    "ruff==0.8.4",
+    "mypy==1.14.0",
+]
+
+# For training (optional, separate venv recommended)
+training = [
+    "torch==2.5.1",
+    "torchvision==0.20.1",
+    "ultralytics==8.3.55",
+    "transformers==4.46.3",
+    "datasets==3.1.0",
+    "scikit-learn==1.6.0",
+    "matplotlib==3.9.3",
+    "mlflow==2.18.0",
+    "dvc==3.59.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["krishisetu_ml*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "N", "RUF", "S", "ASYNC"]
+ignore = ["S101", "S104", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "N"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+plugins = ["pydantic.mypy"]

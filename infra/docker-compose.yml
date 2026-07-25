@@ -1,0 +1,401 @@
+# KrishiSetu Local Development Environment
+#
+# Brings up the entire stack with one command:
+#   docker compose -f infra/docker-compose.yml up -d
+#
+# Services:
+#   - postgres  : PostgreSQL 16 + PostGIS    (port 5432)
+#   - redis     : Redis 7                    (port 6379)
+#   - minio     : S3-compatible object store (ports 9000, 9001)
+#   - api       : FastAPI backend            (port 8000)
+#   - web       : Next.js 14 frontend        (port 3000)
+#
+# Data services (postgres, redis, minio) persist data to named volumes.
+# App services (api, web) mount source code for hot-reload during development.
+
+name: krishisetu
+
+services:
+  # ---------------------------------------------------------------------------
+  # Data Tier
+  # ---------------------------------------------------------------------------
+
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: krishisetu-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-krishisetu}
+      POSTGRES_USER: ${POSTGRES_USER:-krishisetu}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-krishisetu_dev_password}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../services/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-krishisetu} -d ${POSTGRES_DB:-krishisetu}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - krishisetu-net
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: krishisetu-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - krishisetu-net
+
+  minio:
+    image: minio/minio:latest
+    container_name: krishisetu-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9002"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-krishisetu}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9002:9002"   # Web console (changed from 9001 due to port conflict on Windows)
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - krishisetu-net
+
+  # Create the S3 bucket on first run
+  minio-init:
+    image: minio/mc:latest
+    container_name: krishisetu-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-krishisetu} ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password};
+      mc mb local/${MINIO_BUCKET:-krishisetu} --ignore-existing;
+      mc anonymous set download local/${MINIO_BUCKET:-krishisetu};
+      echo 'Bucket created successfully';
+      "
+    networks:
+      - krishisetu-net
+
+  # ---------------------------------------------------------------------------
+  # Application Tier
+  # ---------------------------------------------------------------------------
+
+  api:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    container_name: krishisetu-api
+    restart: unless-stopped
+    environment:
+      ENV: development
+      DEBUG: "true"
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:-krishisetu_dev_password}@postgres:5432/${POSTGRES_DB:-krishisetu}
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
+      S3_BUCKET_NAME: ${MINIO_BUCKET:-krishisetu}
+      S3_REGION: ap-south-1
+      JWT_SECRET: dev-only-secret-please-change-in-production-with-openssl-rand-hex-32
+      CORS_ORIGINS: '["http://localhost:3000"]'
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source code for hot reload during development
+      - ../apps/api:/app
+      - /app/.venv  # Prevent host venv from overriding container venv
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # Override command for dev mode with hot reload
+    command: >
+      sh -c "
+      cd /app &&
+      pip install -e '.[dev]' --quiet &&
+      alembic upgrade head &&
+      uvicorn krishisetu.main:app --host 0.0.0.0 --port 8000 --reload --log-level info
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    networks:
+      - krishisetu-net
+
+  web:
+    build:
+      context: ../apps/web
+      dockerfile: Dockerfile
+      target: deps  # Use deps stage for dev (has node_modules)
+    container_name: krishisetu-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/api/v1
+      NEXT_PUBLIC_APP_NAME: KrishiSetu
+      NEXT_PUBLIC_DEFAULT_LOCALE: en
+      WATCHPACK_POLLING: "true"  # Needed for file watching in Docker volumes
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      api:
+        condition: service_healthy
+    # Override command for dev mode with hot reload
+    # Note: pnpm install (without --frozen-lockfile) to handle missing lockfile on fresh clone
+    command: sh -c "cd /app && pnpm install && pnpm dev"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    networks:
+      - krishisetu-net
+
+  # ---------------------------------------------------------------------------
+  # ML Inference Service
+  # ---------------------------------------------------------------------------
+
+  ml-inference:
+    build:
+      context: ../apps/ml-inference
+      dockerfile: Dockerfile
+    container_name: krishisetu-ml-inference
+    restart: unless-stopped
+    environment:
+      ENV: development
+      LOG_LEVEL: INFO
+      ML_HOST: 0.0.0.0
+      ML_PORT: 8001
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
+      S3_BUCKET_NAME: krishisetu-models
+      S3_REGION: ap-south-1
+      DISEASE_CLASSIFIER_MODEL_PATH: /app/models/disease_classifier_dummy.onnx
+      DISEASE_CLASSIFIER_MODEL_VERSION: v0.1.0-dummy
+      DISEASE_CLASSIFIER_LABELS: healthy,tomato_early_blight,tomato_late_blight,rice_blast,rice_bacterial_blight,wheat_stripe_rust
+      MODEL_WARMUP_ON_START: "false"  # Disable warmup since dummy model may not exist
+      MAX_IMAGE_SIZE_MB: 10
+      INFERENCE_TIMEOUT_SECONDS: 30
+      CORS_ORIGINS: '["http://localhost:3000"]'
+    ports:
+      - "8001:8001"
+    volumes:
+      - ../apps/ml-inference:/app
+      - ml_models:/app/models
+      - /app/.venv
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - krishisetu-net
+
+  # ---------------------------------------------------------------------------
+  # Celery Worker
+  # ---------------------------------------------------------------------------
+
+  worker:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    container_name: krishisetu-worker
+    restart: unless-stopped
+    environment:
+      ENV: development
+      DEBUG: "true"
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:-krishisetu_dev_password}@postgres:5432/${POSTGRES_DB:-krishisetu}
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
+      S3_BUCKET_NAME: ${MINIO_BUCKET:-krishisetu}
+      S3_REGION: ap-south-1
+      JWT_SECRET: dev-only-secret-please-change-in-production-with-openssl-rand-hex-32
+      ML_INFERENCE_URL: http://ml-inference:8001
+    volumes:
+      - ../apps/api:/app
+      - /app/.venv
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      ml-inference:
+        condition: service_started
+    # Run Celery worker for ml-realtime queue
+    command: >
+      sh -c "
+      cd /app &&
+      pip install -e '.[dev]' --quiet &&
+      celery -A krishisetu.workers.celery_app worker
+        --loglevel=info
+        --concurrency=2
+        -Q ml-realtime,default,external-api
+        --hostname=worker@%h
+      "
+    networks:
+      - krishisetu-net
+
+  # ---------------------------------------------------------------------------
+  # Celery Beat (scheduler for periodic tasks)
+  # ---------------------------------------------------------------------------
+
+  celery-beat:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    container_name: krishisetu-celery-beat
+    restart: unless-stopped
+    environment:
+      ENV: development
+      DEBUG: "true"
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:-krishisetu_dev_password}@postgres:5432/${POSTGRES_DB:-krishisetu}
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
+      S3_BUCKET_NAME: ${MINIO_BUCKET:-krishisetu}
+      S3_REGION: ap-south-1
+      JWT_SECRET: dev-only-secret-please-change-in-production-with-openssl-rand-hex-32
+      ML_INFERENCE_URL: http://ml-inference:8001
+    volumes:
+      - ../apps/api:/app
+      - /app/.venv
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Run Celery beat scheduler
+    command: >
+      sh -c "
+      cd /app &&
+      pip install -e '.[dev]' --quiet &&
+      celery -A krishisetu.workers.celery_app beat
+        --loglevel=info
+        --pidfile=/tmp/celerybeat.pid
+      "
+    networks:
+      - krishisetu-net
+
+  # ---------------------------------------------------------------------------
+  # Phase F: Security — OWASP ZAP scanner
+  # ---------------------------------------------------------------------------
+  # Run a baseline scan against the API with:
+  #   docker compose -f infra/docker-compose.yml --profile security run --rm zap-scan
+  #
+  # The scan produces an HTML report at /home/z/my-project/download/zap-report.html
+  # and a JSON report at /home/z/my-project/download/zap-report.json.
+  # It does NOT block startup of other services (uses a profile).
+
+  zap-scan:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    container_name: krishisetu-zap-scan
+    profiles: ["security"]
+    depends_on:
+      - api
+    command: >
+      zap-baseline.py
+      -t http://api:8000/api/v1/health
+      -c infra/security/zap-rules.tsv
+      -I
+      -r /zap/reports/report.html
+      -w /zap/reports/report.md
+      -J /zap/reports/report.json
+    volumes:
+      - ./security:/zap/wrk:ro
+      - ../download:/zap/reports
+    networks:
+      - krishisetu-net
+
+  # ---------------------------------------------------------------------------
+  # Phase F: Security — ClamAV antivirus (for file upload scanning)
+  # ---------------------------------------------------------------------------
+  # Optional service for production deployments. The API connects to it via
+  # AV_SCAN_URL env var (tcp://clamav:3310). In dev, uploads are scanned
+  # only for magic-byte validation (no AV).
+
+  clamav:
+    image: clamav/clamav:1.4
+    container_name: krishisetu-clamav
+    profiles: ["security"]
+    restart: unless-stopped
+    ports:
+      - "3310:3310"
+    volumes:
+      - clamav_data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdcheck.sh || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    networks:
+      - krishisetu-net
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  krishisetu-net:
+    driver: bridge
+    name: krishisetu-network
+
+# ---------------------------------------------------------------------------
+# Volumes (persistent data)
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    name: krishisetu-postgres-data
+  redis_data:
+    name: krishisetu-redis-data
+  minio_data:
+    name: krishisetu-minio-data
+  ml_models:
+    name: krishisetu-ml-models
+  clamav_data:
+    name: krishisetu-clamav-data

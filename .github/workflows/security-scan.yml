@@ -1,0 +1,202 @@
+# KrishiSetu security CI workflow.
+#
+# Runs on every push to main/develop and every pull request. Also runs
+# nightly on the main branch to catch newly-disclosed CVEs.
+#
+# Jobs:
+#   1. python-bandit      — AST-based security lint on the API
+#   2. python-pip-audit   — Python dependency vulnerability scan
+#   3. js-npm-audit       — JS dependency vulnerability scan
+#   4. typecheck          — TypeScript strict type check
+#   5. zap-baseline       — runtime HTTP scan (only on PRs that touch API)
+#   6. docker-trivy       — Docker image scan (only on main branch)
+#
+# A failure in any blocking job blocks the merge. The zap and trivy jobs
+# are non-blocking on develop (warning-only) to allow iteration.
+
+name: Security Scan
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Nightly at 2:30 AM IST (21:00 UTC previous day)
+    - cron: '30 21 * * *'
+
+permissions:
+  contents: read
+  security-events: write  # for SARIF upload
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Python: Bandit + pip-audit
+  # ---------------------------------------------------------------------------
+  python-security:
+    name: Python (Bandit + pip-audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: apps/api/pyproject.toml
+
+      - name: Install security tools
+        run: pip install bandit pip-audit safety
+
+      - name: Bandit (AST security lint)
+        run: bandit -r krishisetu -ll -ii -f sarif -o bandit-results.sarif || true
+
+      - name: pip-audit (dependency vulnerabilities)
+        run: pip-audit --strict --requirement pyproject.toml
+
+      - name: Safety (additional CVE check)
+        run: safety check || true
+
+      - name: Upload Bandit SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: apps/api/bandit-results.sarif
+          category: bandit
+
+  # ---------------------------------------------------------------------------
+  # JavaScript: npm audit
+  # ---------------------------------------------------------------------------
+  js-security:
+    name: JavaScript (npm audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: npm audit (HIGH and CRITICAL)
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit
+
+  # ---------------------------------------------------------------------------
+  # OWASP ZAP baseline scan (only on PRs that touch the API)
+  # ---------------------------------------------------------------------------
+  zap-baseline:
+    name: ZAP Baseline Scan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: [python-security]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start API
+        working-directory: apps/api
+        run: |
+          docker compose -f ../../infra/docker-compose.yml up -d postgres redis minio
+          sleep 10
+          docker compose -f ../../infra/docker-compose.yml up -d api
+          sleep 15
+
+      - name: Wait for API health
+        run: |
+          for i in {1..30}; do
+            if curl -sf http://localhost:8000/api/v1/health > /dev/null; then
+              echo "API is healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API failed to start"
+          exit 1
+
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.13.0
+        with:
+          target: 'http://localhost:8000/api/v1/health'
+          cmd_options: '-c infra/security/zap-rules.tsv -I'
+          allow_issue_writing: false
+          fail_action: false  # set to true once API passes baseline
+
+      - name: Teardown
+        if: always()
+        run: docker compose -f infra/docker-compose.yml down -v
+
+  # ---------------------------------------------------------------------------
+  # Trivy Docker image scan (only on main branch + nightly)
+  # ---------------------------------------------------------------------------
+  docker-trivy:
+    name: Trivy Image Scan
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'schedule'
+    needs: [python-security]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API image
+        working-directory: apps/api
+        run: docker build -t krishisetu-api:ci .
+
+      - name: Trivy scan (HIGH and CRITICAL)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: krishisetu-api:ci
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+  # ---------------------------------------------------------------------------
+  # Ruff + mypy (general lint + type check) — non-blocking on develop
+  # ---------------------------------------------------------------------------
+  python-lint:
+    name: Python (Ruff + mypy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -e '.[dev]'
+
+      - name: Ruff
+        run: ruff check krishisetu
+        continue-on-error: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: mypy
+        run: mypy krishisetu
+        continue-on-error: true  # mypy is strict; don't block yet

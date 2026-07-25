@@ -1,0 +1,162 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "krishisetu-api"
+version = "0.1.0"
+description = "KrishiSetu — One-Stop AI-Powered Agricultural Platform for India"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "KrishiSetu" }]
+
+dependencies = [
+    # Web framework
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "gunicorn==23.0.0",
+    "python-multipart==0.0.20",
+
+    # Database
+    "sqlalchemy[asyncio]==2.0.36",
+    "asyncpg==0.30.0",
+    "alembic==1.14.0",
+    "geoalchemy2==0.16.0",
+    "psycopg[binary]==3.2.3",
+
+    # Cache & queue
+    "redis[hiredis]==5.2.1",
+    "celery==5.4.0",
+
+    # Auth & security
+    "pyjwt==2.10.1",
+    "passlib[bcrypt]==1.7.4",
+    "bcrypt==4.2.1",
+    "cryptography==44.0.0",
+    "pillow==11.0.0",
+
+    # Config & validation
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.0",
+    "python-dotenv==1.0.1",
+
+    # Logging
+    "structlog==24.4.0",
+
+    # HTTP client
+    "httpx==0.28.1",
+
+    # Object storage
+    "boto3==1.35.86",
+    "botocore==1.35.86",
+
+    # Observability
+    "prometheus-client==0.21.1",
+    "opentelemetry-api==1.29.0",
+    "opentelemetry-sdk==1.29.0",
+    "opentelemetry-instrumentation-fastapi==0.50b0",
+    "opentelemetry-instrumentation-sqlalchemy==0.50b0",
+    "opentelemetry-instrumentation-redis==0.50b0",
+    "opentelemetry-exporter-otlp==1.29.0",
+
+    # Utilities
+    "python-dateutil==2.9.0.post0",
+    "email-validator==2.2.0",
+    "phonenumbers==8.13.51",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.0",
+    "pytest-cov==6.0.0",
+    "pytest-mock==3.14.0",
+    "httpx==0.28.1",
+    "ruff==0.8.4",
+    "mypy==1.14.0",
+    "types-python-dateutil==2.9.0.20241206",
+    "types-passlib==1.7.4",
+    "locust==2.32.5",
+    # Phase F security tooling
+    "bandit==1.8.0",
+    "pip-audit==2.7.3",
+    "safety==3.2.9",
+]
+
+[project.urls]
+Homepage = "https://krishisetu.in"
+Repository = "https://github.com/krishisetu/krishisetu"
+Documentation = "https://docs.krishisetu.in"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["krishisetu*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "B",         # flake8-bugbear
+    "C4",        # flake8-comprehensions
+    "UP",        # pyupgrade
+    "N",         # pep8-naming
+    "RUF",       # ruff-specific
+    "S",         # flake8-bandit (security)
+    "ASYNC",     # flake8-async
+]
+ignore = [
+    "S101",      # use of assert (fine in tests)
+    "S104",      # binding to all interfaces (fine in containers)
+    "B008",      # function call in default arg (FastAPI Depends pattern)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "N"]
+"alembic/**" = ["E", "W", "I"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
+
+[[tool.mypy.overrides]]
+module = ["geoalchemy2.*", "passlib.*", "celery.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--cov=krishisetu",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-fail-under=80",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+]

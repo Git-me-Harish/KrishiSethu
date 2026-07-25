@@ -1,0 +1,211 @@
+"""Application configuration loaded from environment variables.
+
+All configuration is validated at startup via Pydantic Settings. A misconfigured
+environment variable causes the application to fail fast at boot, rather than
+fail mysteriously at runtime.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field, HttpUrl, PostgresDsn, RedisDsn, SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """KrishiSetu application settings.
+
+    All values are loaded from environment variables (or .env file in dev).
+    Sensitive values use SecretStr to avoid accidental logging.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
+
+    # --- Environment ---
+    ENV: Literal["development", "staging", "production"] = Field(
+        default="development",
+        description="Application environment profile",
+    )
+    DEBUG: bool = Field(default=False, description="Enable debug mode")
+    LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    # --- Database ---
+    DATABASE_URL: PostgresDsn = Field(
+        ...,
+        description="PostgreSQL async connection URL (postgresql+asyncpg://...)",
+    )
+    DB_POOL_SIZE: int = Field(default=20, ge=1, le=100)
+    DB_MAX_OVERFLOW: int = Field(default=10, ge=0, le=50)
+    DB_POOL_TIMEOUT: int = Field(default=30, ge=5, le=120)
+    DB_POOL_RECYCLE: int = Field(default=1800, ge=300, le=7200)
+
+    # --- Redis ---
+    REDIS_URL: RedisDsn = Field(..., description="Redis connection URL")
+
+    # --- Security ---
+    JWT_SECRET: SecretStr = Field(
+        ...,
+        min_length=32,
+        description="JWT signing secret (use `openssl rand -hex 32` to generate)",
+    )
+    JWT_ALGORITHM: str = Field(default="HS256")
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, ge=1, le=1440)
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=30, ge=1, le=365)
+    PASSWORD_BCRYPT_ROUNDS: int = Field(default=12, ge=10, le=15)
+
+    # --- Object Storage ---
+    S3_ENDPOINT: str = Field(..., description="S3-compatible endpoint URL")
+    S3_ACCESS_KEY: SecretStr = Field(...)
+    S3_SECRET_KEY: SecretStr = Field(...)
+    S3_BUCKET_NAME: str = Field(default="krishisetu")
+    S3_REGION: str = Field(default="ap-south-1")
+
+    # --- CORS ---
+    CORS_ORIGINS: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3000"],
+        description="Allowed CORS origins",
+    )
+
+    # --- Rate Limiting ---
+    RATE_LIMIT_DEFAULT: str = Field(default="100/minute")
+    RATE_LIMIT_AUTH: str = Field(default="5/minute")
+    RATE_LIMIT_ML: str = Field(default="20/minute")
+
+    # --- External APIs (optional in dev) ---
+    IMD_API_KEY: SecretStr | None = None
+    OPENWEATHERMAP_API_KEY: SecretStr | None = None
+    SENTINEL_HUB_CLIENT_ID: SecretStr | None = None
+    SENTINEL_HUB_CLIENT_SECRET: SecretStr | None = None
+    UIDAI_API_KEY: SecretStr | None = None
+    UIDAI_API_URL: HttpUrl | None = None
+    MSG91_AUTH_KEY: SecretStr | None = None
+    FCM_SERVER_KEY: SecretStr | None = None
+
+    # --- ML Inference Service ---
+    ML_INFERENCE_URL: str = Field(default="http://localhost:8001")
+
+    # --- Observability ---
+    OTEL_EXPORTER_OTLP_ENDPOINT: str | None = None
+    OTEL_SERVICE_NAME: str = Field(default="krishisetu-api")
+
+    # --- Phase F: Security Hardening ---
+    # Field-level encryption (AES-256-GCM). Generate with:
+    #   python -c "import secrets, base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+    ENCRYPTION_KEY: SecretStr | None = Field(
+        default=None,
+        description="Base64-encoded 32-byte AES key for field-level encryption",
+    )
+    # Previous keys for rotation. Accepts a JSON array string or comma-separated list.
+    ENCRYPTION_KEY_PREVIOUS: list[SecretStr] = Field(
+        default_factory=list,
+        description="Previous encryption keys (for rotation)",
+    )
+
+    # CSRF protection (double-submit cookie)
+    CSRF_SECRET: SecretStr | None = Field(
+        default=None,
+        min_length=32,
+        description="Secret used to sign CSRF tokens (min 32 chars)",
+    )
+    CSRF_COOKIE_SECURE: bool = Field(
+        default=True,
+        description="Set CSRF cookies with Secure flag (HTTPS only)",
+    )
+
+    # Content Security Policy
+    CSP_DIRECTIVES: str | None = Field(
+        default=None,
+        description="Content-Security-Policy directives (default: strict API policy)",
+    )
+    CSP_REPORT_ONLY: bool = Field(
+        default=False,
+        description="Emit CSP as Report-Only (for staged rollout)",
+    )
+
+    # Request body size limit (bytes). Default 15 MB.
+    MAX_REQUEST_BODY_BYTES: int = Field(
+        default=15 * 1024 * 1024,
+        ge=1024,
+        le=100 * 1024 * 1024,
+        description="Maximum request body size in bytes",
+    )
+
+    # DPDP compliance settings
+    DPDP_DATA_RETENTION_DAYS: int = Field(
+        default=2555,  # 7 years (DPDP allows up to "necessary" period)
+        description="Default data retention period in days for inactive accounts",
+    )
+    DPDP_GRIEVANCE_OFFICER_EMAIL: str | None = Field(
+        default=None,
+        description="Email of the DPDP Grievance Officer",
+    )
+    DPDP_GRIEVANCE_RESOLUTION_DAYS: int = Field(
+        default=30,
+        description="SLA for grievance resolution (DPDP mandates 30 days)",
+    )
+
+    # Antivirus scan endpoint (optional, for file uploads)
+    AV_SCAN_URL: str | None = Field(
+        default=None,
+        description="ClamAV / AV service URL for async file scanning",
+    )
+
+    @field_validator("ENCRYPTION_KEY_PREVIOUS", mode="before")
+    @classmethod
+    def parse_encryption_keys_previous(cls, v: object) -> list[SecretStr]:
+        """Accept ENCRYPTION_KEY_PREVIOUS as JSON array or comma-separated list."""
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            v = v.strip().strip("[]")
+            if not v:
+                return []
+            items = [item.strip().strip('"').strip("'") for item in v.split(",")]
+            return [SecretStr(item) for item in items if item]
+        if isinstance(v, list):
+            return [SecretStr(item) if not isinstance(item, SecretStr) else item for item in v]
+        raise TypeError(f"ENCRYPTION_KEY_PREVIOUS must be str or list, got {type(v)}")
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v: object) -> list[str]:
+        """Accept CORS_ORIGINS as JSON array string or comma-separated list."""
+        if isinstance(v, str):
+            v = v.strip().strip("[]")
+            if not v:
+                return []
+            return [origin.strip().strip('"').strip("'") for origin in v.split(",")]
+        if isinstance(v, list):
+            return v
+        raise TypeError(f"CORS_ORIGINS must be str or list, got {type(v)}")
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENV == "production"
+
+    @property
+    def is_development(self) -> bool:
+        return self.ENV == "development"
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return cached settings instance.
+
+    Cached so that the same Settings instance is reused across the application,
+    avoiding repeated env var parsing.
+    """
+    return Settings()  # type: ignore[call-arg]
+
+
+# Convenience module-level instance (lazy-loaded on first access)
+def settings() -> Settings:
+    """Get the application settings (cached)."""
+    return get_settings()
