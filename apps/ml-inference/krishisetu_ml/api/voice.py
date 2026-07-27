@@ -14,10 +14,13 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 
 from krishisetu_ml.core.logging import get_logger
+from krishisetu_ml.core.uploads import read_upload_limited
 from krishisetu_ml.models.voice_asr import get_voice_asr
 from krishisetu_ml.models.voice_nlu import get_voice_nlu
 
 logger = get_logger(__name__)
+
+MAX_AUDIO_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
@@ -90,12 +93,9 @@ async def transcribe_audio(
             detail=f"Unsupported audio format: {file.content_type}",
         )
 
-    audio_bytes = await file.read()
-    if len(audio_bytes) > 10 * 1024 * 1024:  # 10MB limit
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="Audio file too large (max 10MB)",
-        )
+    # Streamed read: aborts as soon as the running total crosses the limit,
+    # so an oversized body can never be buffered in full.
+    audio_bytes = await read_upload_limited(file, MAX_AUDIO_SIZE_BYTES)
 
     asr = get_voice_asr()
     result = await asr.transcribe(audio_bytes, language=language)
@@ -158,7 +158,7 @@ async def voice_query(
     """
     start_time = time.perf_counter()
 
-    audio_bytes = await file.read()
+    audio_bytes = await read_upload_limited(file, MAX_AUDIO_SIZE_BYTES)
 
     # Step 1: ASR
     asr = get_voice_asr()

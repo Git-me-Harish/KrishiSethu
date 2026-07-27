@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     ML_HOST: str = "0.0.0.0"
     ML_PORT: int = 8001
 
+    # Service-to-service auth — shared secret the main API must present on
+    # every inference request (header: X-ML-Service-Token). Required: the
+    # service refuses to start without it, so it can never run unauthenticated.
+    ML_SERVICE_TOKEN: SecretStr
+
     # Object Storage
     S3_ENDPOINT: str
     S3_ACCESS_KEY: SecretStr
@@ -52,10 +57,8 @@ class Settings(BaseSettings):
     MAX_IMAGE_SIZE_MB: int = 10
     INFERENCE_TIMEOUT_SECONDS: int = 30
 
-    # CORS
-    CORS_ORIGINS: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000"],
-    )
+    # No CORS settings: this service is internal (apps/api only) and does not
+    # run CORS middleware, so there is no origin allowlist to configure.
 
     @field_validator("DISEASE_CLASSIFIER_LABELS", mode="before")
     @classmethod
@@ -66,18 +69,6 @@ class Settings(BaseSettings):
         if isinstance(v, list):
             return v
         raise TypeError(f"Labels must be str or list, got {type(v)}")
-
-    @field_validator("CORS_ORIGINS", mode="before")
-    @classmethod
-    def parse_cors(cls, v: object) -> list[str]:
-        if isinstance(v, str):
-            v = v.strip().strip("[]")
-            if not v:
-                return []
-            return [origin.strip().strip('"').strip("'") for origin in v.split(",")]
-        if isinstance(v, list):
-            return v
-        raise TypeError(f"CORS_ORIGINS must be str or list, got {type(v)}")
 
     @property
     def is_production(self) -> bool:

@@ -109,5 +109,13 @@ $RECYCLE.BIN/
 *.p12
 secrets/
 
-# Keys
-krishisethu-8e872-firebase-adminsdk-fbsvc-2fa055f29d.jsonapps/web/tsconfig.tsbuildinfo
+# Keys / service-account credentials (never commit these)
+*-firebase-adminsdk-*.json
+*serviceaccount*.json
+*service-account*.json
+*credentials*.json
+
+# Build / runtime state
+apps/web/tsconfig.tsbuildinfo
+apps/api/celerybeat-schedule
+project-structure.txt

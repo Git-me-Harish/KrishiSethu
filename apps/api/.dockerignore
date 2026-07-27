@@ -41,3 +41,19 @@ docker-compose*.yml
 README.md
 *.md
 docs/
+
+# Test suite — never needed by the runtime image (gunicorn serves the app);
+# shipping it enlarges the image and exposes fixtures/sample data.
+tests/
+conftest.py
+pytest.ini
+
+# Database migrations. The runtime image only runs gunicorn; migrations are
+# applied from a source checkout (`alembic upgrade head`) or a dedicated
+# migration job, not from this image.
+alembic/
+alembic.ini
+
+# Celery beat runtime state (binary schedule DB) — must never be baked in.
+celerybeat-schedule
+celerybeat.pid

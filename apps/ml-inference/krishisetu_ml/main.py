@@ -9,8 +9,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI
 
 from krishisetu_ml.api import disease, health, voice
 from krishisetu_ml.core.config import settings
@@ -20,6 +19,7 @@ from krishisetu_ml.core.middleware import (
     LoggingMiddleware,
     RequestIDMiddleware,
 )
+from krishisetu_ml.core.security import require_service_token
 
 configure_logging()
 logger = get_logger(__name__)
@@ -71,19 +71,19 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIDMiddleware)
     app.add_middleware(ExceptionHandlerMiddleware)
     app.add_middleware(LoggingMiddleware)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=cfg.CORS_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["X-Request-ID"],
-    )
+    # No CORS middleware: this is an internal service reached only by the
+    # main API over the private network (never by a browser). Adding CORS
+    # here would only widen the attack surface.
 
     # --- Routers ---
-    app.include_router(health.router, prefix="/health")
-    app.include_router(disease.router, prefix="/predict")
-    app.include_router(voice.router, prefix="/voice")
+    # Each router already declares its own prefix; do NOT repeat it here or
+    # the paths get doubled (e.g. /predict/predict/disease).
+    # /health stays unauthenticated so the container healthcheck works.
+    app.include_router(health.router)
+    app.include_router(
+        disease.router, dependencies=[Depends(require_service_token)]
+    )
+    app.include_router(voice.router, dependencies=[Depends(require_service_token)])
 
     # --- Root endpoint ---
     @app.get("/", include_in_schema=False)

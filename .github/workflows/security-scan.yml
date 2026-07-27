@@ -52,14 +52,19 @@ jobs:
       - name: Install security tools
         run: pip install bandit pip-audit safety
 
+      # Bandit must be able to fail the job. The SARIF upload is a separate
+      # `if: always()` step so findings still reach code scanning on failure.
       - name: Bandit (AST security lint)
-        run: bandit -r krishisetu -ll -ii -f sarif -o bandit-results.sarif || true
+        run: bandit -r krishisetu -ll -ii -f sarif -o bandit-results.sarif
 
+      # pip-audit cannot parse a pyproject.toml via --requirement (that flag
+      # expects a requirements.txt). Project mode resolves the dependencies
+      # declared in pyproject.toml instead.
       - name: pip-audit (dependency vulnerabilities)
-        run: pip-audit --strict --requirement pyproject.toml
+        run: pip-audit --strict .
 
       - name: Safety (additional CVE check)
-        run: safety check || true
+        run: safety check
 
       - name: Upload Bandit SARIF
         if: always()
@@ -72,7 +77,7 @@ jobs:
   # JavaScript: npm audit
   # ---------------------------------------------------------------------------
   js-security:
-    name: JavaScript (npm audit)
+    name: JavaScript (pnpm audit)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -80,22 +85,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The repo is pnpm-only: apps/web/pnpm-lock.yaml is tracked and there is
+      # no package-lock.json, so the previous `npm ci` job never ran the audit.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda  # v4.1.0
+        with:
+          version: 9
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: apps/web/package-lock.json
+          cache: 'pnpm'
+          cache-dependency-path: apps/web/pnpm-lock.yaml
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
-      - name: npm audit (HIGH and CRITICAL)
-        run: npm audit --omit=dev --audit-level=high
-        continue-on-error: ${{ github.ref == 'refs/heads/develop' }}
+      - name: pnpm audit (HIGH and CRITICAL)
+        run: pnpm audit --prod --audit-level=high
 
       - name: TypeScript typecheck
-        run: npx tsc --noEmit
+        run: pnpm exec tsc --noEmit
 
   # ---------------------------------------------------------------------------
   # OWASP ZAP baseline scan (only on PRs that touch the API)
@@ -110,6 +121,13 @@ jobs:
 
       - name: Start API
         working-directory: apps/api
+        # docker-compose.yml now refuses to start without these (see findings
+        # on hardcoded JWT secret / unauthenticated redis + ml-inference).
+        # Ephemeral CI-only values; nothing here reaches a real environment.
+        env:
+          JWT_SECRET: ci-only-${{ github.run_id }}-${{ github.run_attempt }}-jwt-secret
+          ML_SERVICE_TOKEN: ci-only-${{ github.run_id }}-${{ github.run_attempt }}-ml-token
+          REDIS_PASSWORD: ci-only-${{ github.run_id }}-redis
         run: |
           docker compose -f ../../infra/docker-compose.yml up -d postgres redis minio
           sleep 10
@@ -134,11 +152,16 @@ jobs:
           target: 'http://localhost:8000/api/v1/health'
           cmd_options: '-c infra/security/zap-rules.tsv -I'
           allow_issue_writing: false
-          fail_action: false  # set to true once API passes baseline
+          fail_action: true
 
       - name: Teardown
         if: always()
-        run: docker compose -f infra/docker-compose.yml down -v
+        working-directory: apps/api
+        env:
+          JWT_SECRET: ci-only-${{ github.run_id }}-${{ github.run_attempt }}-jwt-secret
+          ML_SERVICE_TOKEN: ci-only-${{ github.run_id }}-${{ github.run_attempt }}-ml-token
+          REDIS_PASSWORD: ci-only-${{ github.run_id }}-redis
+        run: docker compose -f ../../infra/docker-compose.yml down -v
 
   # ---------------------------------------------------------------------------
   # Trivy Docker image scan (only on main branch + nightly)
@@ -156,7 +179,9 @@ jobs:
         run: docker build -t krishisetu-api:ci .
 
       - name: Trivy scan (HIGH and CRITICAL)
-        uses: aquasecurity/trivy-action@master
+        # Pinned to a commit SHA: @master is a mutable third-party ref and this
+        # job runs with security-events: write.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           image-ref: krishisetu-api:ci
           severity: 'HIGH,CRITICAL'
@@ -195,8 +220,10 @@ jobs:
 
       - name: Ruff
         run: ruff check krishisetu
-        continue-on-error: ${{ github.ref == 'refs/heads/develop' }}
 
+      # NOT yet blocking: mypy runs in strict mode against a codebase that has
+      # never been type-clean, so gating it here would block every PR until a
+      # separate typing cleanup lands. Track that work before flipping this.
       - name: mypy
         run: mypy krishisetu
-        continue-on-error: true  # mypy is strict; don't block yet
+        continue-on-error: true

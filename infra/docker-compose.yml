@@ -1,12 +1,30 @@
-# KrishiSetu Local Development Environment
+# =============================================================================
+#  DEVELOPMENT ONLY — DO NOT USE THIS FILE TO RUN KRISHISETU IN PRODUCTION
+# =============================================================================
+#  This compose file is for local development on a developer workstation.
+#  It ships weak default credentials, mounts source code into containers and
+#  runs every service with hot-reload. Deploying it as-is would expose farmer
+#  PII (Aadhaar, phone, bank details), disease photos and claim documents.
+#
+#  Required environment (compose refuses to start without them):
+#    JWT_SECRET        — openssl rand -hex 32
+#    ML_SERVICE_TOKEN  — openssl rand -hex 32   (shared API <-> ml-inference)
+#    REDIS_PASSWORD    — any non-empty value locally
+#
+#  Backing services (postgres, redis, minio, ml-inference, clamav) are NOT
+#  published to the host. They talk to each other over krishisetu-net. If you
+#  need a psql/redis-cli session, bind explicitly to 127.0.0.1 in a local
+#  docker-compose.override.yml (already gitignored) rather than editing this
+#  file — never bind them to 0.0.0.0.
+# =============================================================================
 #
 # Brings up the entire stack with one command:
 #   docker compose -f infra/docker-compose.yml up -d
 #
 # Services:
-#   - postgres  : PostgreSQL 16 + PostGIS    (port 5432)
-#   - redis     : Redis 7                    (port 6379)
-#   - minio     : S3-compatible object store (ports 9000, 9001)
+#   - postgres  : PostgreSQL 16 + PostGIS    (internal only)
+#   - redis     : Redis 7                    (internal only)
+#   - minio     : S3-compatible object store (internal only)
 #   - api       : FastAPI backend            (port 8000)
 #   - web       : Next.js 14 frontend        (port 3000)
 #
@@ -29,8 +47,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-krishisetu}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-krishisetu_dev_password}
       PGDATA: /var/lib/postgresql/data/pgdata
-    ports:
-      - "5432:5432"
+    # Not published to the host: reachable only from krishisetu-net.
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ../services/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
@@ -47,13 +64,17 @@ services:
     image: redis:7.4-alpine
     container_name: krishisetu-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
-    ports:
-      - "6379:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+    command: >
+      redis-server --appendonly yes --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+    # Not published to the host: reachable only from krishisetu-net.
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -68,9 +89,8 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-krishisetu}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
-    ports:
-      - "9000:9000"   # S3 API
-      - "9002:9002"   # Web console (changed from 9001 due to port conflict on Windows)
+    # Not published to the host: the S3 API and console are reachable only
+    # from krishisetu-net. Bind them in a local override if you need the UI.
     volumes:
       - minio_data:/data
     healthcheck:
@@ -92,8 +112,8 @@ services:
       /bin/sh -c "
       mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-krishisetu} ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password};
       mc mb local/${MINIO_BUCKET:-krishisetu} --ignore-existing;
-      mc anonymous set download local/${MINIO_BUCKET:-krishisetu};
-      echo 'Bucket created successfully';
+      mc anonymous set none local/${MINIO_BUCKET:-krishisetu};
+      echo 'Bucket created successfully (private; objects served via presigned URLs)';
       "
     networks:
       - krishisetu-net
@@ -110,16 +130,21 @@ services:
     restart: unless-stopped
     environment:
       ENV: development
-      DEBUG: "true"
+      # DEBUG drives SQLAlchemy echo, which logs every statement WITH bound
+      # parameters (Aadhaar, phone, bank details). Keep it false.
+      DEBUG: "false"
       LOG_LEVEL: INFO
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:-krishisetu_dev_password}@postgres:5432/${POSTGRES_DB:-krishisetu}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
       S3_BUCKET_NAME: ${MINIO_BUCKET:-krishisetu}
       S3_REGION: ap-south-1
-      JWT_SECRET: dev-only-secret-please-change-in-production-with-openssl-rand-hex-32
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set (openssl rand -hex 32)}
+      ML_INFERENCE_URL: http://ml-inference:8001
+      # Shared secret the API must send to ml-inference as X-ML-Service-Token
+      ML_SERVICE_TOKEN: ${ML_SERVICE_TOKEN:?ML_SERVICE_TOKEN must be set (openssl rand -hex 32)}
       CORS_ORIGINS: '["http://localhost:3000"]'
     ports:
       - "8000:8000"
@@ -200,6 +225,9 @@ services:
       LOG_LEVEL: INFO
       ML_HOST: 0.0.0.0
       ML_PORT: 8001
+      # Must match the API's ML_SERVICE_TOKEN; callers send it as the
+      # X-ML-Service-Token header. /health is exempt (container healthcheck).
+      ML_SERVICE_TOKEN: ${ML_SERVICE_TOKEN:?ML_SERVICE_TOKEN must be set (openssl rand -hex 32)}
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
@@ -211,9 +239,8 @@ services:
       MODEL_WARMUP_ON_START: "false"  # Disable warmup since dummy model may not exist
       MAX_IMAGE_SIZE_MB: 10
       INFERENCE_TIMEOUT_SECONDS: 30
-      CORS_ORIGINS: '["http://localhost:3000"]'
-    ports:
-      - "8001:8001"
+    # Not published to the host: this is an internal service that only the
+    # API and worker call, over krishisetu-net.
     volumes:
       - ../apps/ml-inference:/app
       - ml_models:/app/models
@@ -242,17 +269,21 @@ services:
     restart: unless-stopped
     environment:
       ENV: development
-      DEBUG: "true"
+      # Keep false: DEBUG turns on SQLAlchemy echo, logging every SQL
+      # statement with bound parameters (Aadhaar, phone, bank details).
+      DEBUG: "false"
       LOG_LEVEL: INFO
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:-krishisetu_dev_password}@postgres:5432/${POSTGRES_DB:-krishisetu}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
       S3_BUCKET_NAME: ${MINIO_BUCKET:-krishisetu}
       S3_REGION: ap-south-1
-      JWT_SECRET: dev-only-secret-please-change-in-production-with-openssl-rand-hex-32
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set (openssl rand -hex 32)}
       ML_INFERENCE_URL: http://ml-inference:8001
+      # Shared secret the worker must send to ml-inference as X-ML-Service-Token
+      ML_SERVICE_TOKEN: ${ML_SERVICE_TOKEN:?ML_SERVICE_TOKEN must be set (openssl rand -hex 32)}
     volumes:
       - ../apps/api:/app
       - /app/.venv
@@ -291,17 +322,20 @@ services:
     restart: unless-stopped
     environment:
       ENV: development
-      DEBUG: "true"
+      # Keep false: DEBUG turns on SQLAlchemy echo, logging every SQL
+      # statement with bound parameters (Aadhaar, phone, bank details).
+      DEBUG: "false"
       LOG_LEVEL: INFO
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:-krishisetu_dev_password}@postgres:5432/${POSTGRES_DB:-krishisetu}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
       S3_BUCKET_NAME: ${MINIO_BUCKET:-krishisetu}
       S3_REGION: ap-south-1
-      JWT_SECRET: dev-only-secret-please-change-in-production-with-openssl-rand-hex-32
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set (openssl rand -hex 32)}
       ML_INFERENCE_URL: http://ml-inference:8001
+      ML_SERVICE_TOKEN: ${ML_SERVICE_TOKEN:?ML_SERVICE_TOKEN must be set (openssl rand -hex 32)}
     volumes:
       - ../apps/api:/app
       - /app/.venv
@@ -364,8 +398,8 @@ services:
     container_name: krishisetu-clamav
     profiles: ["security"]
     restart: unless-stopped
-    ports:
-      - "3310:3310"
+    # Not published to the host: the API reaches it at tcp://clamav:3310
+    # over krishisetu-net.
     volumes:
       - clamav_data:/var/lib/clamav
     healthcheck:
