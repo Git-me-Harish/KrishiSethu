@@ -10,7 +10,15 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, HttpUrl, PostgresDsn, RedisDsn, SecretStr, field_validator
+from pydantic import (
+    Field,
+    HttpUrl,
+    PostgresDsn,
+    RedisDsn,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,8 +37,10 @@ class Settings(BaseSettings):
     )
 
     # --- Environment ---
+    # Defaults to "production": a missing/typo'd ENV must never silently unlock
+    # development-only behaviour (debug OTP echo, /docs, permissive checks).
     ENV: Literal["development", "staging", "production"] = Field(
-        default="development",
+        default="production",
         description="Application environment profile",
     )
     DEBUG: bool = Field(default=False, description="Enable debug mode")
@@ -55,10 +65,35 @@ class Settings(BaseSettings):
         min_length=32,
         description="JWT signing secret (use `openssl rand -hex 32` to generate)",
     )
-    JWT_ALGORITHM: str = Field(default="HS256")
+    # Constrained to symmetric HMAC families only. An unconstrained str would
+    # let a bad env value ("none") disable signature verification outright.
+    JWT_ALGORITHM: Literal["HS256", "HS384", "HS512"] = Field(default="HS256")
+    JWT_ISSUER: str = Field(
+        default="krishisetu-api",
+        description="Value of the JWT `iss` claim (issued and required on decode)",
+    )
+    JWT_AUDIENCE: str = Field(
+        default="krishisetu-app",
+        description="Value of the JWT `aud` claim (issued and required on decode)",
+    )
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, ge=1, le=1440)
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=30, ge=1, le=365)
     PASSWORD_BCRYPT_ROUNDS: int = Field(default=12, ge=10, le=15)
+
+    # Dedicated pepper for the Aadhaar lookup hash. Kept separate from
+    # JWT_SECRET so that rotating the signing key does not silently break
+    # Aadhaar duplicate detection. See core/security.py:hash_aadhaar.
+    AADHAAR_HASH_PEPPER: SecretStr | None = Field(
+        default=None,
+        min_length=32,
+        description="Pepper for Aadhaar hashing (min 32 chars, never rotate casually)",
+    )
+    AADHAAR_HASH_ITERATIONS: int = Field(
+        default=310_000,
+        ge=100_000,
+        le=2_000_000,
+        description="PBKDF2-HMAC-SHA256 iteration count for Aadhaar hashing",
+    )
 
     # --- Object Storage ---
     S3_ENDPOINT: str = Field(..., description="S3-compatible endpoint URL")
@@ -81,7 +116,13 @@ class Settings(BaseSettings):
 
     # --- Rate Limiting ---
     RATE_LIMIT_DEFAULT: str = Field(default="100/minute")
+    # Per-IP limit on credential-guessing endpoints (login, verify-otp, OAuth
+    # callback). Enforced by core/rate_limiter.AuthRateLimitMiddleware.
     RATE_LIMIT_AUTH: str = Field(default="5/minute")
+    # Refresh is a legitimate background call (every access-token expiry, on
+    # every open tab), so it gets a looser budget than credential entry —
+    # 5/minute per IP would break users behind a shared NAT.
+    RATE_LIMIT_AUTH_REFRESH: str = Field(default="30/minute")
     RATE_LIMIT_ML: str = Field(default="20/minute")
 
     # --- Google OAuth ---
@@ -116,6 +157,18 @@ class Settings(BaseSettings):
 
     # --- ML Inference Service ---
     ML_INFERENCE_URL: str = Field(default="http://localhost:8001")
+    ML_SERVICE_TOKEN: SecretStr = Field(
+        ...,
+        min_length=32,
+        description=(
+            "Shared secret sent as the X-ML-Service-Token header on every "
+            "call to the ML inference service, which is fail-closed and "
+            "rejects unauthenticated requests. Required: the API cannot do "
+            "disease diagnosis or voice inference without it, so a missing "
+            "value must fail at boot rather than at the first farmer's "
+            "upload. Generate with `openssl rand -hex 32`."
+        ),
+    )
 
     # --- Observability ---
     OTEL_EXPORTER_OTLP_ENDPOINT: str | None = None
@@ -208,6 +261,35 @@ class Settings(BaseSettings):
         if isinstance(v, list):
             return v
         raise TypeError(f"CORS_ORIGINS must be str or list, got {type(v)}")
+
+    @model_validator(mode="after")
+    def enforce_production_hardening(self) -> Settings:
+        """Refuse to boot with a development-grade config in production.
+
+        Each of these is a real exposure if it reaches production, and each
+        is invisible at runtime until it is exploited — so fail fast at import
+        time rather than warn in a log nobody reads.
+        """
+        if self.ENV != "production":
+            return self
+
+        problems: list[str] = []
+        if self.DEBUG:
+            problems.append("DEBUG must be False")
+        if "*" in self.CORS_ORIGINS:
+            problems.append("CORS_ORIGINS must not contain '*'")
+        if self.CSRF_SECRET is None:
+            problems.append("CSRF_SECRET must be set")
+        if self.ENCRYPTION_KEY is None:
+            problems.append("ENCRYPTION_KEY must be set")
+        if not self.CSRF_COOKIE_SECURE:
+            problems.append("CSRF_COOKIE_SECURE must be True")
+
+        if problems:
+            raise ValueError(
+                "Insecure configuration for ENV=production: " + "; ".join(problems)
+            )
+        return self
 
     @property
     def is_production(self) -> bool:

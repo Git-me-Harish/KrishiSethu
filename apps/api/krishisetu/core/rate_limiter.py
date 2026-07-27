@@ -1,4 +1,13 @@
-"""External API rate limiter — protects against API quota exhaustion.
+"""Rate limiting — external API quotas, and per-IP throttling of auth routes.
+
+Two independent concerns live here:
+
+1. ExternalAPIRateLimiter — protects *us* from exhausting third-party quotas
+   (IMD, OWM, Sentinel Hub, UIDAI, MSG91), with a circuit breaker.
+2. AuthRateLimitMiddleware — protects the *auth endpoints* from credential
+   stuffing and OTP brute force, keyed on client IP. Registered in main.py.
+
+--- External API rate limiter ---
 
 Each external API has different rate limits. This module provides a
 unified rate limiter that:
@@ -25,10 +34,16 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
+from fastapi import Request, Response
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from krishisetu.core.config import settings
 from krishisetu.core.logging import get_logger
 from krishisetu.core.redis import get_redis
 
@@ -228,3 +243,127 @@ def get_rate_limiter() -> ExternalAPIRateLimiter:
     if _rate_limiter is None:
         _rate_limiter = ExternalAPIRateLimiter()
     return _rate_limiter
+
+
+# ---------------------------------------------------------------------------
+# Per-IP throttling of authentication endpoints
+# ---------------------------------------------------------------------------
+
+_WINDOW_SECONDS: dict[str, int] = {
+    "second": 1,
+    "minute": 60,
+    "hour": 3600,
+    "day": 86400,
+}
+
+
+def parse_rate(rate: str) -> tuple[int, int]:
+    """Parse a "<count>/<period>" rate string into (max_requests, seconds).
+
+    Accepts the same syntax as the RATE_LIMIT_* settings, e.g. "5/minute".
+    """
+    count_str, _, period = rate.partition("/")
+    period = period.strip().lower().rstrip("s") or "minute"
+    window = _WINDOW_SECONDS.get(period)
+    if window is None:
+        raise ValueError(f"Unsupported rate period: {rate!r}")
+    return int(count_str.strip()), window
+
+
+def client_ip(request: Request) -> str:
+    """Best-effort client IP, honouring the first X-Forwarded-For hop."""
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+async def check_ip_rate_limit(
+    bucket: str,
+    identifier: str,
+    rate: str,
+) -> tuple[bool, int]:
+    """Fixed-window counter for (bucket, identifier).
+
+    Returns (allowed, retry_after_seconds). Fails OPEN if Redis is down —
+    an unreachable cache must not take authentication offline.
+    """
+    max_requests, window = parse_rate(rate)
+    now = int(time.time())
+    key = f"authrl:{bucket}:{identifier}:{now // window}"
+
+    try:
+        redis = await get_redis()
+        pipe = redis.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, window)
+        results = await pipe.execute()
+        current = int(results[0])
+    except Exception as exc:  # pragma: no cover — Redis outage path
+        logger.error("auth_rate_limit.backend_error", bucket=bucket, error=str(exc))
+        return True, 0
+
+    if current > max_requests:
+        retry_after = window - (now % window)
+        return False, max(retry_after, 1)
+    return True, 0
+
+
+class AuthRateLimitMiddleware(BaseHTTPMiddleware):
+    """Per-IP rate limiting on credential-bearing auth endpoints.
+
+    Without this, /auth/login-password and /auth/verify-otp accept unlimited
+    guesses from a single host: the OTP counter is per-phone and the lockout
+    counter is per-account, so neither costs an attacker anything when they
+    spread guesses across many accounts.
+
+    Limits come from settings (RATE_LIMIT_AUTH, RATE_LIMIT_AUTH_REFRESH) and
+    are enforced on the exact paths below — deliberately not a prefix match,
+    so adding an auth route does not silently inherit or escape a limit.
+    """
+
+    #: request path -> settings attribute holding its rate string
+    LIMITED_PATHS: ClassVar[dict[str, str]] = {
+        "/api/v1/auth/login-password": "RATE_LIMIT_AUTH",
+        "/api/v1/auth/verify-otp": "RATE_LIMIT_AUTH",
+        "/api/v1/auth/send-otp": "RATE_LIMIT_AUTH",
+        "/api/v1/auth/google/callback": "RATE_LIMIT_AUTH",
+        "/api/v1/auth/google/exchange": "RATE_LIMIT_AUTH",
+        "/api/v1/auth/refresh": "RATE_LIMIT_AUTH_REFRESH",
+    }
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        setting_name = self.LIMITED_PATHS.get(request.url.path.rstrip("/") or "/")
+        if setting_name is None:
+            return await call_next(request)
+
+        rate = getattr(settings(), setting_name)
+        ip = client_ip(request)
+        allowed, retry_after = await check_ip_rate_limit(
+            bucket=request.url.path, identifier=ip, rate=rate
+        )
+
+        if not allowed:
+            logger.warning(
+                "auth_rate_limit.exceeded",
+                path=request.url.path,
+                ip=ip,
+                rate=rate,
+            )
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": {
+                        "code": "RATE_LIMIT_EXCEEDED",
+                        "message": "Too many attempts. Please try again later.",
+                        "details": {"retry_after_seconds": retry_after},
+                    }
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        return await call_next(request)

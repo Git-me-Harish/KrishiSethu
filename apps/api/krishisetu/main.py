@@ -24,6 +24,7 @@ from krishisetu.core.middleware import (
     RequestIDMiddleware,
 )
 from krishisetu.core.csrf import CSRFMiddleware
+from krishisetu.core.rate_limiter import AuthRateLimitMiddleware
 from krishisetu.core.redis import close_redis
 from krishisetu.core.security_headers import SecurityHeadersMiddleware, csp_report_handler
 from krishisetu.core.security_middleware import (
@@ -91,7 +92,12 @@ def create_app() -> FastAPI:
     #   ExceptionHandlerMiddleware — convert unhandled exceptions to clean 500s
     #   LoggingMiddleware         — log every request with duration
     #   CSRFMiddleware            — enforce double-submit cookie on writes
+    #   AuthRateLimitMiddleware   — per-IP throttle on auth endpoints
     #   CORSMiddleware            — handle CORS preflight
+    #
+    # AuthRateLimitMiddleware sits inside CORS (so 429s carry CORS headers and
+    # are readable by the browser) but outside routing, so throttled requests
+    # never reach a DB session or a bcrypt verify.
     #
     # Note: In Starlette, middleware added LAST runs FIRST on the request
     # path. So the order below is REVERSED from the request-flow order above.
@@ -102,6 +108,7 @@ def create_app() -> FastAPI:
     app.add_middleware(ExceptionHandlerMiddleware)
     app.add_middleware(LoggingMiddleware)
     app.add_middleware(CSRFMiddleware)
+    app.add_middleware(AuthRateLimitMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.CORS_ORIGINS,

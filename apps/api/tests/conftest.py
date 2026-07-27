@@ -48,6 +48,16 @@ os.environ.setdefault(
     "test-csrf-secret-must-be-at-least-32-characters-long",
 )
 os.environ.setdefault("DPDP_GRIEVANCE_OFFICER_EMAIL", "test-grievance@krishisetu.in")
+os.environ.setdefault(
+    "AADHAAR_HASH_PEPPER",
+    "test-aadhaar-pepper-must-be-at-least-32-characters-long",
+)
+# Keep Aadhaar hashing cheap in tests — production uses the 310k default.
+os.environ.setdefault("AADHAAR_HASH_ITERATIONS", "100000")
+os.environ.setdefault(
+    "ML_SERVICE_TOKEN",
+    "test-ml-service-token-must-be-at-least-32-characters",
+)
 
 from krishisetu.core.database import Base, get_db  # noqa: E402
 from krishisetu.core.redis import get_redis  # noqa: E402

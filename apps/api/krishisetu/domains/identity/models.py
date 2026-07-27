@@ -81,12 +81,27 @@ class User(Base):
         default=False,
     )
 
-    # --- Aadhaar (encrypted / hashed only — never raw) ---
-    aadhaar_hash: Mapped[str | None] = mapped_column(
+    # --- Federated identity ---
+    google_sub: Mapped[str | None] = mapped_column(
         String(64),
         unique=True,
         nullable=True,
-        comment="SHA-256 hash of Aadhaar number, salted with app secret",
+        index=True,
+        comment=(
+            "Google's immutable subject identifier. Matched BEFORE email on "
+            "OAuth login — email alone is user-settable and was hijackable."
+        ),
+    )
+
+    # --- Aadhaar (encrypted / hashed only — never raw) ---
+    aadhaar_hash: Mapped[str | None] = mapped_column(
+        String(128),
+        unique=True,
+        nullable=True,
+        comment=(
+            "Peppered PBKDF2 hash of the Aadhaar number, prefixed with its "
+            "scheme version ('v2$...'). Legacy rows hold a bare SHA-256 digest."
+        ),
     )
     aadhaar_verified: Mapped[bool] = mapped_column(
         Boolean,

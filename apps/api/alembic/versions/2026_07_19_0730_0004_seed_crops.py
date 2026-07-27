@@ -130,7 +130,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Delete all seeded crops (preserves any user-added ones if we had a UI for that)
-    op.execute("DELETE FROM farmer.crops WHERE slug IN :slugs")
     # Note: parameterized DDL doesn't work in Alembic; use explicit list
     slugs = ", ".join(f"'{c[0]}'" for c in CROPS)
     op.execute(f"DELETE FROM farmer.crops WHERE slug IN ({slugs})")

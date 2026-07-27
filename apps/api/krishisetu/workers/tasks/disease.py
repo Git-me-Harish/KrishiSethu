@@ -271,6 +271,9 @@ async def _call_inference_service(image_bytes: bytes) -> dict[str, Any]:
             response = await client.post(
                 endpoint,
                 files={"file": ("image.jpg", image_bytes, "image/jpeg")},
+                headers={
+                    "X-ML-Service-Token": settings().ML_SERVICE_TOKEN.get_secret_value()
+                },
             )
         except httpx.ConnectError as e:
             raise RuntimeError(f"ML service unavailable at {endpoint}: {e}") from e

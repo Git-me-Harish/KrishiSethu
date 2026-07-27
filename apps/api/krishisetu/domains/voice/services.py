@@ -54,6 +54,9 @@ async def process_voice_query(
                 endpoint,
                 files={"file": (f"audio.{ext}", audio_bytes, content_type)},
                 params=params,
+                headers={
+                    "X-ML-Service-Token": settings().ML_SERVICE_TOKEN.get_secret_value()
+                },
             )
         except httpx.ConnectError as e:
             logger.error("voice.ml_service_unavailable", error=str(e))
@@ -94,6 +97,9 @@ async def classify_text_intent(
         response = await client.post(
             endpoint,
             json={"text": text, "language": language},
+            headers={
+                "X-ML-Service-Token": settings().ML_SERVICE_TOKEN.get_secret_value()
+            },
         )
 
     if response.status_code != 200:
