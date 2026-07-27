@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2, ShieldCheck, XCircle } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
-import { authApi } from "@/lib/api/client";
+import { tokenStorage } from "@/lib/api/client";
 
 /**
  * Google OAuth callback page.
@@ -21,10 +21,11 @@ import { authApi } from "@/lib/api/client";
  *   /login?error=google_server_error   — unexpected server error
  *
  * This page:
- * 1. Reads access_token + refresh_token from URL params
- * 2. Stores them via authApi.completeGoogleOAuth (stores + fetches /me)
- * 3. Hydrates the auth store
- * 4. Redirects to /dashboard
+ * 1. Reads access_token + refresh_token from URL query params
+ * 2. Stores them in localStorage via tokenStorage
+ * 3. Calls /me to fetch user and stores it
+ * 4. Hydrates the auth store
+ * 5. Redirects to /dashboard
  *
  * On any failure it shows an error and redirects to /login.
  */
@@ -32,38 +33,61 @@ export default function AuthCallbackPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { hydrate } = useAuthStore();
+  const processed = useRef(false);
 
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState<string>("");
 
   useEffect(() => {
-    const accessToken = searchParams.get("access_token");
-    const refreshToken = searchParams.get("refresh_token");
+    // Prevent double-execution in StrictMode
+    if (processed.current) return;
+    processed.current = true;
 
-    if (!accessToken || !refreshToken) {
-      setStatus("error");
-      setErrorMessage("Invalid callback — missing tokens. Redirecting to login...");
-      const timeout = setTimeout(() => router.replace("/login?error=google_missing_tokens"), 2500);
-      return () => clearTimeout(timeout);
-    }
+    (async () => {
+      const error = searchParams.get("error");
+      if (error) {
+        setStatus("error");
+        setErrorMessage("Authentication was denied or failed. Redirecting to login...");
+        setTimeout(() => router.replace(`/login?error=${error}`), 2000);
+        return;
+      }
 
-    authApi
-      .completeGoogleOAuth(accessToken, refreshToken)
-      .then(() => {
+      const accessToken = searchParams.get("access_token");
+      const refreshToken = searchParams.get("refresh_token");
+
+      if (!accessToken || !refreshToken) {
+        setStatus("error");
+        setErrorMessage("Invalid callback — missing tokens. Redirecting to login...");
+        setTimeout(() => router.replace("/login?error=google_missing_tokens"), 2000);
+        return;
+      }
+
+      try {
+        // Store tokens in localStorage
+        tokenStorage.setTokens(accessToken, refreshToken);
+
+        // Fetch user via /me and store it so hydrate() works immediately
+        const { authApi } = await import("@/lib/api/client");
+        try {
+          const user = await authApi.getMe();
+          tokenStorage.setUser(user);
+        } catch {
+          // /me can fail due to clock skew, but tokens are stored.
+          // AuthProvider's hydrate() + refreshUser() will pick them up
+          // when the dashboard page renders.
+        }
+
         hydrate();
         setStatus("success");
-        // Brief success flash before redirect
-        const timeout = setTimeout(() => router.replace("/dashboard"), 800);
-        return () => clearTimeout(timeout);
-      })
-      .catch((err: Error) => {
-        console.error("Google OAuth completion failed:", err);
+        setTimeout(() => router.replace("/dashboard"), 800);
+      } catch (err) {
+        console.error("Google OAuth token storage failed:", err);
         setStatus("error");
-        setErrorMessage("Authentication failed. Redirecting to login...");
-        const timeout = setTimeout(() => router.replace("/login?error=google_completion_failed"), 2500);
-        return () => clearTimeout(timeout);
-      });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+        setErrorMessage("Failed to complete authentication. Redirecting to login...");
+        setTimeout(() => router.replace("/login?error=google_storage_failed"), 2000);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
