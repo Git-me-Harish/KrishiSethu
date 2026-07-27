@@ -300,13 +300,14 @@ officer_router = APIRouter(
 async def officer_list_plots(
     current_user: CurrentUser,
     db: DBSession,
-    district: str | None = Query(default=None, description="Filter by district. Defaults to officer's district."),
-    state: str | None = Query(default=None),
     verification_status: PlotVerificationStatus | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ) -> PlotListResponse:
     """List plots in the officer's district (for verification worklist).
+
+    The district is resolved from the officer's own assignment — it is never
+    taken from the request.
 
     Officers can filter by verification_status to focus on:
     - pending: New plots awaiting verification
@@ -314,18 +315,9 @@ async def officer_list_plots(
     - verified: Already verified (historical)
     - rejected: Rejected plots (audit)
     """
-    # TODO: In Phase 2, get officer's assigned district from their profile
-    # For now, use the query parameter
-    if not district:
-        from krishisetu.core.exceptions import ValidationError
-
-        raise ValidationError("district query parameter is required")
-
     return await services.officer_list_district_plots(
         db,
-        current_user.id,
-        district,
-        state,
+        current_user,
         verification_status=verification_status,
         page=page,
         page_size=page_size,
@@ -363,7 +355,7 @@ async def officer_verify_plot(
     return await services.officer_verify_plot(
         db,
         plot_id,
-        current_user.id,
+        current_user,
         PlotVerificationStatus(payload.status),
         payload.notes,
     )

@@ -377,7 +377,7 @@ async def insurer_list_claims(
     ordered by submission date (oldest first).
     """
     return await services.insurer_list_claims(
-        db, current_user.id, status=status_filter, page=page, page_size=page_size
+        db, current_user, status=status_filter, page=page, page_size=page_size
     )
 
 
@@ -400,5 +400,5 @@ async def insurer_review_claim(
       The farmer will be notified to provide additional evidence.
     """
     return await services.insurer_review_claim(
-        db, claim_id, current_user.id, payload
+        db, claim_id, current_user, payload
     )

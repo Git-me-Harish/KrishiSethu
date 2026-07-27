@@ -577,6 +577,7 @@ def _row_to_order_item_dict(row: Any) -> dict[str, Any]:
     return {
         "id": row.id,
         "product_id": row.product_id,
+        "supplier_id": row.supplier_id,
         "product_name": row.product_name,
         "product_image_url": getattr(row, "product_image_url", None),
         "unit_price": Decimal(str(row.unit_price)),

@@ -82,6 +82,61 @@ async def get_payment_by_reference(
     return result.scalar_one_or_none()
 
 
+async def find_settled_payment_for_reference(
+    db: AsyncSession,
+    *,
+    reference_id: UUID,
+    user_id: UUID,
+    min_amount: Decimal,
+) -> Payment | None:
+    """Find a captured/released, non-refunded payment covering a reference.
+
+    Used to prove a real payment exists before a policy/order is activated —
+    a client-supplied payment reference is never sufficient.
+    """
+    result = await db.execute(
+        select(Payment)
+        .where(
+            and_(
+                Payment.reference_id == reference_id,
+                Payment.user_id == user_id,
+                Payment.status.in_(
+                    [PaymentStatus.CAPTURED.value, PaymentStatus.RELEASED.value]
+                ),
+                Payment.amount_refunded == Decimal("0"),
+                Payment.amount >= min_amount,
+            )
+        )
+        .order_by(desc(Payment.created_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_payment_by_provider_order_id(
+    db: AsyncSession, provider_order_id: str
+) -> Payment | None:
+    """Get the payment that owns a provider (Razorpay) order id.
+
+    This is the join key for webhook reconciliation — the webhook payload
+    carries the provider's order id, not ours.
+    """
+    result = await db.execute(
+        select(Payment).where(Payment.provider_order_id == provider_order_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_payment_by_provider_payment_id(
+    db: AsyncSession, provider_payment_id: str
+) -> Payment | None:
+    """Get a payment by the provider's payment id (fallback webhook join key)."""
+    result = await db.execute(
+        select(Payment).where(Payment.provider_payment_id == provider_payment_id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def list_payments_by_user(
     db: AsyncSession,
     user_id: UUID,
@@ -145,28 +200,55 @@ async def mark_payment_pending(
     )
 
 
-async def mark_payment_captured(
+async def mark_payment_captured_if_pending(
     db: AsyncSession,
     payment_id: UUID,
     provider_payment_id: str,
-    provider_signature: str,
+    provider_signature: str | None = None,
     payment_method: str | None = None,
     upi_id: str | None = None,
     raw_response: dict | None = None,
-) -> Payment | None:
-    """Mark payment as captured (payment verified)."""
-    return await update_payment(
-        db,
-        payment_id,
-        status=PaymentStatus.CAPTURED.value,
-        provider_payment_id=provider_payment_id,
-        provider_signature=provider_signature,
-        payment_method=payment_method,
-        upi_id=upi_id,
-        raw_provider_response=raw_response,
-        paid_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
+) -> tuple[Payment | None, bool]:
+    """Atomically capture a payment that is still created/pending.
+
+    Compare-and-set: the UPDATE only matches rows still in created/pending, so
+    when the Razorpay JS callback and the webhook race for the same payment,
+    exactly one of them transitions it. Returns (payment, transitioned) — a
+    False means someone else already captured it, which is not an error.
+
+    Scope boundary: `authorized` is intentionally NOT matched. Nothing in the
+    codebase sets that status today, so widening the CAS now would be
+    speculative. Whoever adds an authorize-then-capture flow (Razorpay's
+    payment.authorized event, or manual capture) must revisit this function —
+    and must also ensure an authorize-only payment does NOT trigger the
+    non-escrow auto-release in services._capture_payment, since no money has
+    moved at that point.
+    """
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        update(Payment)
+        .where(
+            and_(
+                Payment.id == payment_id,
+                Payment.status.in_(
+                    [PaymentStatus.CREATED.value, PaymentStatus.PENDING.value]
+                ),
+            )
+        )
+        .values(
+            status=PaymentStatus.CAPTURED.value,
+            provider_payment_id=provider_payment_id,
+            provider_signature=provider_signature,
+            payment_method=payment_method,
+            upi_id=upi_id,
+            raw_provider_response=raw_response,
+            paid_at=now,
+            updated_at=now,
+        )
     )
+    await db.flush()
+    transitioned = result.rowcount > 0
+    return await get_payment_by_id(db, payment_id), transitioned
 
 
 async def mark_payment_failed(
@@ -189,15 +271,29 @@ async def release_escrow(
     payment_id: UUID,
     released_to_user_id: UUID,
 ) -> Payment | None:
-    """Release escrowed payment to supplier/insurer."""
-    return await update_payment(
-        db,
-        payment_id,
-        status=PaymentStatus.RELEASED.value,
-        escrow_released_at=datetime.now(timezone.utc),
-        released_to_user_id=released_to_user_id,
-        updated_at=datetime.now(timezone.utc),
+    """Release a captured payment to supplier/insurer.
+
+    Compare-and-set on `captured`, so a payment can only ever be released
+    once even if two callers race (webhook + JS callback).
+    """
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(Payment)
+        .where(
+            and_(
+                Payment.id == payment_id,
+                Payment.status == PaymentStatus.CAPTURED.value,
+            )
+        )
+        .values(
+            status=PaymentStatus.RELEASED.value,
+            escrow_released_at=now,
+            released_to_user_id=released_to_user_id,
+            updated_at=now,
+        )
     )
+    await db.flush()
+    return await get_payment_by_id(db, payment_id)
 
 
 async def process_refund(
@@ -272,6 +368,18 @@ async def webhook_exists(db: AsyncSession, provider: str, event_id: str) -> bool
         )
     )
     return result.scalar_one() > 0
+
+
+async def link_webhook_payment(
+    db: AsyncSession, webhook_id: UUID, payment_id: UUID
+) -> None:
+    """Attach a resolved payment to a recorded webhook (audit trail)."""
+    await db.execute(
+        update(PaymentWebhook)
+        .where(PaymentWebhook.id == webhook_id)
+        .values(payment_id=payment_id)
+    )
+    await db.flush()
 
 
 async def mark_webhook_processed(db: AsyncSession, webhook_id: UUID) -> None:

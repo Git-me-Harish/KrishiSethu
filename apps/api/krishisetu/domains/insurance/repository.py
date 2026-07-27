@@ -389,11 +389,16 @@ async def list_claims_by_farmer(
 async def list_claims_for_insurer(
     db: AsyncSession,
     *,
+    insurer_name: str | None = None,
     status: ClaimStatus | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[dict[str, Any]], int]:
-    """List claims for insurer review (submitted or under_review)."""
+    """List claims for insurer review (submitted or under_review).
+
+    When `insurer_name` is given, only claims on that insurer's products are
+    returned. None means unrestricted (admin).
+    """
     base_filter = InsuranceClaim.status.in_([
         ClaimStatus.SUBMITTED.value,
         ClaimStatus.UNDER_REVIEW.value,
@@ -403,10 +408,23 @@ async def list_claims_for_insurer(
     count_query = select(func.count(InsuranceClaim.id)).where(base_filter)
     if status:
         count_query = count_query.where(InsuranceClaim.status == status)
+    if insurer_name:
+        count_query = count_query.where(
+            InsuranceClaim.policy_id.in_(
+                select(InsurancePolicy.id).where(
+                    InsurancePolicy.product_id.in_(
+                        select(InsuranceProduct.id).where(
+                            InsuranceProduct.insurer_name == insurer_name
+                        )
+                    )
+                )
+            )
+        )
     total = (await db.execute(count_query)).scalar_one()
 
     offset = (page - 1) * page_size
-    query = text("""
+    insurer_clause = "AND pr.insurer_name = :insurer_name" if insurer_name else ""
+    query = text(f"""
         SELECT c.*, p.policy_number, p.sum_insured, p.area_insured_ha,
                pr.crop_slug, pr.crop_name, pr.season as product_season,
                pr.season_year as product_season_year, pr.insurer_name,
@@ -418,10 +436,14 @@ async def list_claims_for_insurer(
         LEFT JOIN farmer.plots pl ON pl.id = p.plot_id
         LEFT JOIN identity.users u ON u.id = c.farmer_id
         WHERE c.status IN ('submitted', 'under_review', 'evidence_requested')
+        {insurer_clause}
         ORDER BY c.submitted_at ASC
         LIMIT :limit OFFSET :offset
     """)
-    result = await db.execute(query, {"limit": page_size, "offset": offset})
+    params: dict[str, Any] = {"limit": page_size, "offset": offset}
+    if insurer_name:
+        params["insurer_name"] = insurer_name
+    result = await db.execute(query, params)
     claims = [_row_to_claim_dict(row) for row in result.fetchall()]
     return claims, total
 

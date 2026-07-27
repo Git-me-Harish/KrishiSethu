@@ -36,6 +36,7 @@ from krishisetu.core.storage import get_storage
 from krishisetu.domains.disease import repository as disease_repo
 from krishisetu.domains.farmer import repository as farmer_repo
 from krishisetu.domains.insurance import repository as repo
+from krishisetu.domains.insurance.insurer_scope import resolve_insurer_name
 from krishisetu.domains.insurance.models import (
     ClaimStatus,
     ClaimType,
@@ -57,6 +58,7 @@ from krishisetu.domains.insurance.schemas import (
     PolicyPremiumPaymentRequest,
     PolicyResponse,
 )
+from krishisetu.domains.identity.models import User
 from krishisetu.domains.ndvi import repository as ndvi_repo
 from krishisetu.domains.soil_weather import repository as weather_repo
 
@@ -254,12 +256,12 @@ async def pay_premium(
     farmer_id: UUID,
     payload: PolicyPremiumPaymentRequest,
 ) -> PolicyResponse:
-    """Mark premium as paid (stub for payment gateway integration).
+    """Activate a policy once its premium payment has actually settled.
 
-    In production, this would:
-    1. Verify payment with the payment gateway (UPI/Razorpay)
-    2. Capture the payment
-    3. Update policy status to active
+    The policy is only activated when a captured (or released), non-refunded
+    payment exists for this policy, owned by the farmer, for at least the
+    premium amount. The client-supplied `payment_reference` is recorded but
+    never trusted as proof of payment.
     """
     policy_dict = await repo.get_policy_by_id(db, policy_id)
     if not policy_dict:
@@ -276,14 +278,30 @@ async def pay_premium(
             f"Policy is in '{policy_dict['status']}' state, cannot accept payment."
         )
 
+    # Require a real settled payment for this policy before activating it.
+    from krishisetu.domains.payment import repository as payment_repo
+
+    payment = await payment_repo.find_settled_payment_for_reference(
+        db,
+        reference_id=policy_id,
+        user_id=farmer_id,
+        min_amount=policy_dict["premium_amount"],
+    )
+    if not payment:
+        raise ValidationError(
+            "No settled premium payment found for this policy. Complete the "
+            "payment via /payments before activating the policy."
+        )
+
     policy = await repo.update_policy_premium_payment(
-        db, policy_id, payload.payment_reference
+        db, policy_id, payment.payment_number
     )
 
     logger.info(
         "insurance.premium_paid",
         policy_id=str(policy_id),
-        payment_reference=payload.payment_reference,
+        payment_id=str(payment.id),
+        payment_reference=payment.payment_number,
     )
 
     updated_dict = await repo.get_policy_by_id(db, policy_id)
@@ -734,17 +752,19 @@ async def _auto_attach_evidence(
 
 async def insurer_list_claims(
     db: AsyncSession,
-    insurer_id: UUID,
+    insurer: User,
     *,
     status: ClaimStatus | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> Any:
-    """List claims for insurer review."""
+    """List claims for insurer review, scoped to the reviewer's insurer."""
     from krishisetu.domains.insurance.schemas import InsurerClaimListResponse
 
+    insurer_name = resolve_insurer_name(insurer)
+
     claims, total = await repo.list_claims_for_insurer(
-        db, status=status, page=page, page_size=page_size
+        db, insurer_name=insurer_name, status=status, page=page, page_size=page_size
     )
     return InsurerClaimListResponse(
         claims=[_to_claim_response(c) for c in claims],
@@ -755,11 +775,18 @@ async def insurer_list_claims(
 async def insurer_review_claim(
     db: AsyncSession,
     claim_id: UUID,
-    insurer_id: UUID,
+    insurer: User,
     payload: InsurerReviewRequest,
 ) -> ClaimResponse:
-    """Insurer reviews a claim (approve/reject/request_evidence)."""
-    claim_dict = await repo.get_claim_by_id(db, claim_id, include_evidence=False)
+    """Insurer reviews a claim (approve/reject/request_evidence).
+
+    The reviewer may only act on claims written against their own insurer's
+    products, and an approval can never exceed the claimed amount or the
+    policy's sum insured.
+    """
+    # include_evidence=True is required: the repository only returns a dict
+    # (rather than an ORM row) on that path.
+    claim_dict = await repo.get_claim_by_id(db, claim_id, include_evidence=True)
     if not claim_dict:
         raise NotFoundError("InsuranceClaim", str(claim_id))
 
@@ -773,10 +800,30 @@ async def insurer_review_claim(
             f"Only submitted/under_review/evidence_requested claims can be reviewed."
         )
 
+    policy_dict = await repo.get_policy_by_id(db, claim_dict["policy_id"])
+    if not policy_dict:
+        raise NotFoundError("InsurancePolicy", str(claim_dict["policy_id"]))
+
+    # Bind the reviewer to the claim's insurer
+    insurer_name = resolve_insurer_name(insurer)
+    if insurer_name:
+        product = policy_dict.get("product") or {}
+        if product.get("insurer_name") != insurer_name:
+            raise NotFoundError("InsuranceClaim", str(claim_id))
+
+    # Clamp the approved amount to what was claimed and to the sum insured
+    if payload.approved_amount is not None:
+        limit = min(claim_dict["claimed_amount"], policy_dict["sum_insured"])
+        if payload.approved_amount > limit:
+            raise ValidationError(
+                f"approved_amount ({payload.approved_amount}) exceeds the "
+                f"claimable maximum ({limit})."
+            )
+
     updated = await repo.insurer_review_claim(
         db,
         claim_id,
-        insurer_id,
+        insurer.id,
         action=payload.action,
         approved_amount=payload.approved_amount,
         review_notes=payload.review_notes,
@@ -788,7 +835,7 @@ async def insurer_review_claim(
         "insurance.claim_reviewed",
         claim_id=str(claim_id),
         action=payload.action,
-        insurer_id=str(insurer_id),
+        insurer_id=str(insurer.id),
     )
 
     return _to_claim_response(updated)

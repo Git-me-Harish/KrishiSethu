@@ -372,8 +372,7 @@ async def supplier_update_order_status(
 
     # Verify this supplier has items in this order
     has_items = any(
-        item.get("fulfillment_status") == "pending"
-        or True  # Check if any item belongs to this supplier
+        item.get("supplier_id") == supplier.id
         for item in order_dict.get("items", [])
     )
     if not has_items:

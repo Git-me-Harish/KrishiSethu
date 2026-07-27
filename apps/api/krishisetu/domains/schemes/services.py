@@ -16,6 +16,8 @@ from krishisetu.core.exceptions import (
 )
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.farmer import repository as farmer_repo
+from krishisetu.domains.farmer.officer_scope import resolve_officer_jurisdiction
+from krishisetu.domains.identity.models import User
 from krishisetu.domains.schemes import repository as repo
 from krishisetu.domains.schemes.eligibility import evaluate_eligibility
 from krishisetu.domains.schemes.models import ApplicationStatus
@@ -303,14 +305,22 @@ async def withdraw_application(
 
 async def officer_list_applications(
     db: AsyncSession,
+    officer: User,
     *,
     status: ApplicationStatus | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> SchemeApplicationListResponse:
-    """List applications for officer review."""
+    """List applications for officer review, scoped to the officer's district."""
+    jurisdiction = resolve_officer_jurisdiction(officer)
+
     apps, total = await repo.list_applications_for_review(
-        db, status=status, page=page, page_size=page_size
+        db,
+        district=jurisdiction.district if jurisdiction else None,
+        state=jurisdiction.state if jurisdiction else None,
+        status=status,
+        page=page,
+        page_size=page_size,
     )
     return SchemeApplicationListResponse(
         applications=[SchemeApplicationResponse(**a) for a in apps],
@@ -321,13 +331,25 @@ async def officer_list_applications(
 async def officer_review_application(
     db: AsyncSession,
     app_id: UUID,
-    officer_id: UUID,
+    officer: User,
     payload: OfficerReviewRequest,
 ) -> SchemeApplicationResponse:
-    """Officer reviews a scheme application."""
+    """Officer reviews a scheme application from their own district."""
+    officer_id = officer.id
     app_dict = await repo.get_application_by_id(db, app_id)
     if not app_dict:
         raise NotFoundError("SchemeApplication", str(app_id))
+
+    jurisdiction = resolve_officer_jurisdiction(officer)
+    if jurisdiction is not None:
+        in_district = await farmer_repo.farmer_has_plot_in_district(
+            db,
+            app_dict["farmer_id"],
+            jurisdiction.district,
+            jurisdiction.state,
+        )
+        if not in_district:
+            raise NotFoundError("SchemeApplication", str(app_id))
 
     if app_dict["status"] not in (
         ApplicationStatus.SUBMITTED.value,

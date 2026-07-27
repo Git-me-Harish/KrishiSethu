@@ -200,10 +200,41 @@ async def validate_upload(
     Raises:
         FileValidationError on any check failure.
     """
+    # 1-5. Shared checks (filename, extension, size, magic bytes)
+    content = await file.read()
+    safe = validate_file_bytes(
+        content,
+        filename=file.filename or "upload",
+        context=context,
+        check_magic=read_into_memory,
+    )
+
+    # 6. Reset file position for downstream consumers
+    await file.seek(0)
+
+    return safe
+
+
+def validate_file_bytes(
+    content: bytes,
+    *,
+    filename: str,
+    context: UploadContext,
+    check_magic: bool = True,
+) -> SafeUpload:
+    """Validate already-read bytes against the rules for the given context.
+
+    Used both by `validate_upload` (multipart uploads that reach the API) and
+    by the pre-signed upload flow, where the API validates the object *after*
+    the client has PUT it to S3 and before it is accepted.
+
+    Raises:
+        FileValidationError on any check failure.
+    """
     rules = _UPLOAD_RULES[context]
 
     # 1. Filename sanitization
-    original = file.filename or "upload"
+    original = filename or "upload"
     try:
         safe_name = sanitize_filename(original)
     except Exception as e:
@@ -218,8 +249,7 @@ async def validate_upload(
             code="FILE_TYPE_NOT_ALLOWED",
         )
 
-    # 3. Read file content for size + magic byte checks
-    content = await file.read()
+    # 3. Size checks
     size = len(content)
 
     if size == 0:
@@ -236,7 +266,7 @@ async def validate_upload(
     magic_validated = False
     category = rules["category"]
 
-    if read_into_memory:
+    if check_magic:
         signatures = _MAGIC_BYTES.get(category, [])
         header = content[:32]
 
@@ -281,10 +311,7 @@ async def validate_upload(
                 # Don't fail on imghdr errors, just log — magic bytes already validated
                 logger.debug("upload.imghdr_check_failed", error=str(e))
 
-    # 6. Reset file position for downstream consumers
-    await file.seek(0)
-
-    # 7. Determine MIME type
+    # 6. Determine MIME type
     mime_type = _MIME_MAP.get(ext, "application/octet-stream")
 
     return SafeUpload(
@@ -341,5 +368,12 @@ __all__ = [
     "UploadContext",
     "SafeUpload",
     "validate_upload",
+    "validate_file_bytes",
+    "max_size_for",
     "strip_exif",
 ]
+
+
+def max_size_for(context: UploadContext) -> int:
+    """Max allowed size in bytes for an upload context."""
+    return int(_UPLOAD_RULES[context]["max_size"])

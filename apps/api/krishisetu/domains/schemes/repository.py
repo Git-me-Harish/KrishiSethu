@@ -268,34 +268,61 @@ async def officer_review_application(
 async def list_applications_for_review(
     db: AsyncSession,
     *,
+    district: str | None = None,
+    state: str | None = None,
     status: ApplicationStatus | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[dict[str, Any]], int]:
-    """List applications for officer review."""
-    base_filter = SchemeApplication.status.in_([
-        ApplicationStatus.SUBMITTED.value,
-        ApplicationStatus.UNDER_REVIEW.value,
-        ApplicationStatus.RESUBMISSION_REQUESTED.value,
-    ])
+    """List applications for officer review.
 
-    count_query = select(func.count(SchemeApplication.id)).where(base_filter)
-    if status:
-        count_query = count_query.where(SchemeApplication.status == status)
-    total = (await db.execute(count_query)).scalar_one()
+    When `district`/`state` are given, only applications from farmers holding
+    a plot in that district are returned (None = unrestricted, admin only).
+    """
+    district_sql = """
+        EXISTS (
+            SELECT 1 FROM farmer.plots pl
+            WHERE pl.farmer_id = a.farmer_id
+              AND pl.district = :district
+              AND pl.state = :state
+        )
+    """
 
     offset = (page - 1) * page_size
-    query = text("""
+    params: dict[str, Any] = {"limit": page_size, "offset": offset}
+    district_clause = ""
+    if district and state:
+        district_clause = f"AND {district_sql}"
+        params["district"] = district
+        params["state"] = state
+
+    status_clause = ""
+    if status:
+        status_clause = "AND a.status = :status"
+        params["status"] = status.value
+
+    count_query = text(f"""
+        SELECT COUNT(*) FROM schemes.scheme_applications a
+        WHERE a.status IN ('submitted', 'under_review', 'resubmission_requested')
+        {status_clause}
+        {district_clause}
+    """)
+    count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+    total = (await db.execute(count_query, count_params)).scalar_one()
+
+    query = text(f"""
         SELECT a.*, s.code as scheme_code, s.name as scheme_name,
                u.full_name as farmer_name, u.phone as farmer_phone
         FROM schemes.scheme_applications a
         LEFT JOIN schemes.scheme_catalog s ON s.id = a.scheme_id
         LEFT JOIN identity.users u ON u.id = a.farmer_id
         WHERE a.status IN ('submitted', 'under_review', 'resubmission_requested')
+        {status_clause}
+        {district_clause}
         ORDER BY a.submitted_at ASC
         LIMIT :limit OFFSET :offset
     """)
-    result = await db.execute(query, {"limit": page_size, "offset": offset})
+    result = await db.execute(query, params)
     apps = [_row_to_application_dict(row) for row in result.fetchall()]
     return apps, total
 

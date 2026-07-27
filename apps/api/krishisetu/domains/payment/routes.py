@@ -15,16 +15,11 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, Header, Path, Query, Request, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Header, Path, Query, Request, status
 
-from krishisetu.core.dependencies import CurrentUser, DBSession, require_permissions
+from krishisetu.core.dependencies import CurrentUser, DBSession, require_role
 from krishisetu.core.logging import get_logger
-from krishisetu.domains.identity.permissions import (
-    PERM_MARKETPLACE_ORDER,
-    PERM_INSURANCE_APPLY,
-    PERM_MARKETPLACE_READ_OWN_ORDERS,
-)
+from krishisetu.domains.identity.models import UserRole
 from krishisetu.domains.payment import services
 from krishisetu.domains.payment.models import PaymentStatus
 from krishisetu.domains.payment.schemas import (
@@ -32,6 +27,7 @@ from krishisetu.domains.payment.schemas import (
     CreatePaymentResponse,
     PaymentResponse,
     RefundRequest,
+    ReleaseEscrowRequest,
     VerifyPaymentRequest,
 )
 
@@ -115,30 +111,24 @@ async def refund_payment(
 @router.post(
     "/{payment_id}/release",
     response_model=PaymentResponse,
-    dependencies=[Depends(require_permissions(PERM_MARKETPLACE_ORDER))],
+    dependencies=[Depends(require_role(UserRole.ADMIN))],
 )
 async def release_escrow(
     payment_id: Annotated[UUID, Path()],
+    payload: ReleaseEscrowRequest,
     current_user: CurrentUser,
     db: DBSession,
-    payload: BaseModel = Body(...),
 ) -> PaymentResponse:
-    """Release escrowed payment to supplier.
+    """Release escrowed payment to the supplier of the referenced order.
 
-    Called when:
-    - Marketplace order delivered → release to supplier
-    - Insurance claim approved → release payout to farmer
-
-    Body: {"released_to_user_id": "uuid"}
+    Admin only. The payee is derived server-side from the order's supplier;
+    `released_to_user_id` in the body is ignored.
     """
-    released_to = payload.dict().get("released_to_user_id")
-    if not released_to:
+    if str(payment_id) != str(payload.payment_id):
         from krishisetu.core.exceptions import ValidationError
-        raise ValidationError("released_to_user_id is required")
+        raise ValidationError("Payment ID mismatch between path and body")
 
-    return await services.release_escrow(
-        db, payment_id, UUID(str(released_to))
-    )
+    return await services.release_escrow(db, payment_id, current_user.id)
 
 
 @router.get(

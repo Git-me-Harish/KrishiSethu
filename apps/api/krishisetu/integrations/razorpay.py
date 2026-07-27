@@ -31,6 +31,7 @@ import secrets
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -91,7 +92,11 @@ class RazorpayClient:
     def __init__(self) -> None:
         self.key_id = self._get_key_id()
         self.key_secret = self._get_key_secret()
+        self.webhook_secret = self._get_webhook_secret()
         self.timeout = 15.0
+        # Fail closed on construction: simulation is only ever acceptable in an
+        # explicitly-development environment.
+        self._ensure_configured()
 
     def _get_key_id(self) -> str | None:
         """Get Razorpay key ID from settings (env var)."""
@@ -104,9 +109,47 @@ class RazorpayClient:
         secret = os.environ.get("RAZORPAY_KEY_SECRET")
         return secret
 
+    def _get_webhook_secret(self) -> str | None:
+        import os
+        return os.environ.get("RAZORPAY_WEBHOOK_SECRET")
+
+    def _ensure_configured(self) -> None:
+        """Refuse to simulate payments outside an explicitly-development ENV.
+
+        Simulation mode accepts any signature, so it must never be reachable
+        when ENV is anything other than 'development'.
+        """
+        missing = [
+            name
+            for name, value in (
+                ("RAZORPAY_KEY_ID", self.key_id),
+                ("RAZORPAY_KEY_SECRET", self.key_secret),
+                ("RAZORPAY_WEBHOOK_SECRET", self.webhook_secret),
+            )
+            if not value
+        ]
+        if not missing:
+            return
+
+        if settings().is_development:
+            logger.warning("razorpay.simulation_mode", missing=missing)
+            return
+
+        logger.error("razorpay.credentials_missing", env=settings().ENV, missing=missing)
+        raise RuntimeError(
+            f"Razorpay is not configured ({', '.join(missing)}). Payment "
+            f"signature verification cannot be bypassed outside development."
+        )
+
     @property
     def is_live(self) -> bool:
-        """Whether the client makes real Razorpay API calls."""
+        """Whether the client makes real Razorpay API calls.
+
+        When this is False the client simulates payments and accepts any
+        signature — `_ensure_configured` guarantees that can only happen when
+        `settings().is_development` is true.
+        """
+        self._ensure_configured()
         return (
             self.key_id is not None
             and self.key_secret is not None
@@ -217,7 +260,12 @@ class RazorpayClient:
             True if signature is valid
         """
         if not self.is_live:
-            # Dev mode: accept any signature
+            # Dev mode only (guarded by _ensure_configured): accept any signature
+            if not settings().is_development:
+                raise RuntimeError(
+                    "Refusing to bypass Razorpay signature verification outside "
+                    "development."
+                )
             logger.info("razorpay.signature_verified.dev", order_id=order_id, payment_id=payment_id)
             return True
 
@@ -258,7 +306,7 @@ class RazorpayClient:
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(
-                    f"{self.BASE_URL}/payments/{payment_id}",
+                    f"{self.BASE_URL}/payments/{quote(payment_id, safe='')}",
                     auth=(self.key_id, self.key_secret),
                 )
         except httpx.HTTPError as e:
@@ -321,7 +369,7 @@ class RazorpayClient:
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
-                    f"{self.BASE_URL}/payments/{payment_id}/refund",
+                    f"{self.BASE_URL}/payments/{quote(payment_id, safe='')}/refund",
                     json=payload,
                     auth=(self.key_id, self.key_secret),
                 )
@@ -355,9 +403,15 @@ class RazorpayClient:
         Razorpay signs webhooks with HMAC-SHA256 using the webhook secret.
         """
         if not self.is_live:
+            # Dev mode only (guarded by _ensure_configured)
+            if not settings().is_development:
+                raise RuntimeError(
+                    "Refusing to bypass Razorpay webhook verification outside "
+                    "development."
+                )
             return True
 
-        webhook_secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
+        webhook_secret = self.webhook_secret or ""
         if not webhook_secret:
             logger.warning("razorpay.webhook_secret_not_set")
             return False

@@ -380,26 +380,66 @@ async def list_plots_by_farmer(
     return plots, total
 
 
+async def farmer_has_plot_in_district(
+    db: AsyncSession,
+    farmer_id: UUID,
+    district: str,
+    state: str,
+) -> bool:
+    """Whether a farmer holds any plot in the given district.
+
+    Used to scope officer actions on farmer-owned records (scheme
+    applications, disease reports) to the officer's own district.
+    """
+    result = await db.execute(
+        select(func.count(Plot.id)).where(
+            Plot.farmer_id == farmer_id,
+            Plot.district == district,
+            Plot.state == state,
+        )
+    )
+    return result.scalar_one() > 0
+
+
 async def list_plots_by_district(
     db: AsyncSession,
-    district: str,
+    district: str | None,
     state: str | None = None,
     *,
     verification_status: PlotVerificationStatus | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[dict[str, Any]], int]:
-    """List plots in a district (for agri officers)."""
+    """List plots in a district (for agri officers).
+
+    `district`/`state` of None mean unrestricted — only ever passed for admin
+    callers. The same filters are applied to the count and the page so an
+    officer's worklist cannot leak plots outside their district.
+    """
     offset = (page - 1) * page_size
 
-    count_query = select(func.count(Plot.id)).where(Plot.district == district)
+    count_query = select(func.count(Plot.id))
+    if district:
+        count_query = count_query.where(Plot.district == district)
     if state:
         count_query = count_query.where(Plot.state == state)
     if verification_status:
         count_query = count_query.where(Plot.verification_status == verification_status)
     total = (await db.execute(count_query)).scalar_one()
 
-    query = text("""
+    params: dict[str, Any] = {"limit": page_size, "offset": offset}
+    filters = ["1 = 1"]
+    if district:
+        filters.append("p.district = :district")
+        params["district"] = district
+    if state:
+        filters.append("p.state = :state")
+        params["state"] = state
+    if verification_status:
+        filters.append("p.verification_status = :verification_status")
+        params["verification_status"] = verification_status.value
+
+    query = text(f"""
         SELECT p.id, p.survey_number, p.village, p.district, p.state,
                p.area_ha, p.verification_status, p.nickname,
                ST_X(p.centroid::geometry) as centroid_lon,
@@ -409,11 +449,10 @@ async def list_plots_by_district(
                u.phone as farmer_phone
         FROM farmer.plots p
         JOIN identity.users u ON u.id = p.farmer_id
-        WHERE p.district = :district
+        WHERE {' AND '.join(filters)}
         ORDER BY p.created_at DESC
         LIMIT :limit OFFSET :offset
     """)
-    params: dict[str, Any] = {"district": district, "limit": page_size, "offset": offset}
     result = await db.execute(query, params)
     rows = result.fetchall()
     plots = [_row_to_list_item_dict(row) for row in rows]

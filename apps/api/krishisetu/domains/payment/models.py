@@ -253,10 +253,15 @@ class Payment(Base):
 
     @property
     def is_paid(self) -> bool:
+        """Whether the money has actually been taken.
+
+        AUTHORIZED is deliberately excluded: an authorized payment has funds
+        reserved, not captured, so treating it as paid would credit money the
+        platform does not hold.
+        """
         return self.status in (
             PaymentStatus.CAPTURED,
             PaymentStatus.RELEASED,
-            PaymentStatus.AUTHORIZED,
         )
 
     @property

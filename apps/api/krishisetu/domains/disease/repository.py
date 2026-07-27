@@ -204,17 +204,34 @@ async def list_disease_reports_by_farmer(
 async def list_reports_for_officer_review(
     db: AsyncSession,
     *,
+    district: str | None = None,
+    state: str | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[dict[str, Any]], int]:
-    """List disease reports needing officer review (low confidence)."""
-    count_query = select(func.count(DiseaseReport.id)).where(
-        DiseaseReport.status == DiseaseReportStatus.OFFICER_REVIEW
-    )
-    total = (await db.execute(count_query)).scalar_one()
+    """List disease reports needing officer review (low confidence).
 
-    offset = (page - 1) * page_size
-    query = text("""
+    When `district`/`state` are given, only reports on plots in that district
+    are returned (None = unrestricted, admin only).
+    """
+    params: dict[str, Any] = {"limit": page_size, "offset": (page - 1) * page_size}
+    district_clause = ""
+    if district and state:
+        district_clause = "AND pl.district = :district AND pl.state = :state"
+        params["district"] = district
+        params["state"] = state
+
+    count_query = text(f"""
+        SELECT COUNT(*)
+        FROM intelligence.disease_reports r
+        LEFT JOIN farmer.plots pl ON pl.id = r.plot_id
+        WHERE r.status = 'officer_review'
+        {district_clause}
+    """)
+    count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+    total = (await db.execute(count_query, count_params)).scalar_one()
+
+    query = text(f"""
         SELECT r.id, r.farmer_id, r.plot_id, r.crop_cycle_id, r.image_url,
                r.submitted_at, r.status, r.farmer_notes, r.created_at,
                p.disease_slug, p.confidence, p.is_reliable,
@@ -225,10 +242,11 @@ async def list_reports_for_officer_review(
         JOIN identity.users u ON u.id = r.farmer_id
         LEFT JOIN farmer.plots pl ON pl.id = r.plot_id
         WHERE r.status = 'officer_review'
+        {district_clause}
         ORDER BY r.created_at ASC
         LIMIT :limit OFFSET :offset
     """)
-    result = await db.execute(query, {"limit": page_size, "offset": offset})
+    result = await db.execute(query, params)
     reports = [_row_to_officer_list_item_dict(row) for row in result.fetchall()]
     return reports, total
 
