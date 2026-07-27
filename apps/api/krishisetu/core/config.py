@@ -73,10 +73,36 @@ class Settings(BaseSettings):
         description="Allowed CORS origins",
     )
 
+    # --- Frontend ---
+    FRONTEND_URL: str = Field(
+        default="http://localhost:3000",
+        description="Frontend base URL — used for OAuth callback redirects",
+    )
+
     # --- Rate Limiting ---
     RATE_LIMIT_DEFAULT: str = Field(default="100/minute")
     RATE_LIMIT_AUTH: str = Field(default="5/minute")
     RATE_LIMIT_ML: str = Field(default="20/minute")
+
+    # --- Google OAuth ---
+    # Register these in Google Cloud Console → Credentials → OAuth 2.0 Client IDs
+    # The redirect URI must be added to "Authorized redirect URIs" in GCC.
+    GOOGLE_OAUTH_CLIENT_ID: str = Field(
+        default="",
+        description="Google OAuth 2.0 client ID",
+    )
+    GOOGLE_OAUTH_CLIENT_SECRET: SecretStr | None = Field(
+        default=None,
+        description="Google OAuth 2.0 client secret",
+    )
+    GOOGLE_OAUTH_REDIRECT_URI: str = Field(
+        default="http://localhost:8000/api/v1/auth/google/callback",
+        description=(
+            "Redirect URI sent to Google during OAuth initiation. "
+            "Must exactly match an entry in Google Cloud Console's "
+            "'Authorized redirect URIs'."
+        ),
+    )
 
     # --- External APIs (optional in dev) ---
     IMD_API_KEY: SecretStr | None = None
@@ -96,13 +122,10 @@ class Settings(BaseSettings):
     OTEL_SERVICE_NAME: str = Field(default="krishisetu-api")
 
     # --- Phase F: Security Hardening ---
-    # Field-level encryption (AES-256-GCM). Generate with:
-    #   python -c "import secrets, base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"
     ENCRYPTION_KEY: SecretStr | None = Field(
         default=None,
         description="Base64-encoded 32-byte AES key for field-level encryption",
     )
-    # Previous keys for rotation. Accepts a JSON array string or comma-separated list.
     ENCRYPTION_KEY_PREVIOUS: list[SecretStr] = Field(
         default_factory=list,
         description="Previous encryption keys (for rotation)",
@@ -139,7 +162,7 @@ class Settings(BaseSettings):
 
     # DPDP compliance settings
     DPDP_DATA_RETENTION_DAYS: int = Field(
-        default=2555,  # 7 years (DPDP allows up to "necessary" period)
+        default=2555,
         description="Default data retention period in days for inactive accounts",
     )
     DPDP_GRIEVANCE_OFFICER_EMAIL: str | None = Field(
@@ -194,18 +217,18 @@ class Settings(BaseSettings):
     def is_development(self) -> bool:
         return self.ENV == "development"
 
+    @property
+    def google_oauth_enabled(self) -> bool:
+        """Whether Google OAuth is configured and usable."""
+        return bool(self.GOOGLE_OAUTH_CLIENT_ID and self.GOOGLE_OAUTH_CLIENT_SECRET)
+
 
 @lru_cache
 def get_settings() -> Settings:
-    """Return cached settings instance.
-
-    Cached so that the same Settings instance is reused across the application,
-    avoiding repeated env var parsing.
-    """
+    """Return cached settings instance."""
     return Settings()  # type: ignore[call-arg]
 
 
-# Convenience module-level instance (lazy-loaded on first access)
 def settings() -> Settings:
     """Get the application settings (cached)."""
     return get_settings()

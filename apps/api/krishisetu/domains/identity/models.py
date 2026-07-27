@@ -22,6 +22,7 @@ from enum import Enum
 from uuid import UUID
 
 from sqlalchemy import DateTime, Integer, String, Boolean, func
+from krishisetu.core.types import make_enum_type
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -94,13 +95,12 @@ class User(Base):
         default=False,
     )
 
-    # --- Profile ---
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[UserRole] = mapped_column(
-        String(20),
-        server_default=func.text("'farmer'"),
+        make_enum_type(UserRole)(20),
         nullable=False,
         default=UserRole.FARMER,
+        server_default="farmer",
     )
     is_active: Mapped[bool] = mapped_column(
         Boolean,
