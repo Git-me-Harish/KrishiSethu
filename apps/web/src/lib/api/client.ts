@@ -37,6 +37,33 @@ const ACCESS_TOKEN_KEY = "krishisetu_access_token";
 const REFRESH_TOKEN_KEY = "krishisetu_refresh_token";
 const USER_KEY = "krishisetu_user";
 
+/**
+ * Marker cookie read by src/middleware.ts to gate /dashboard server-side.
+ *
+ * Deliberately contains NO credential — just "1". Middleware runs on the
+ * server and cannot see localStorage, so it needs *some* signal that a
+ * session exists; this is that signal and nothing more. Every actual
+ * authorization decision is still made by the API against the Bearer token,
+ * so forging this cookie buys an attacker an empty dashboard shell whose
+ * every request 401s.
+ *
+ * It cannot be HttpOnly: it is written by client-side JS at the moment
+ * tokens land in localStorage, and the API is on a different origin so its
+ * Set-Cookie would not reach the Next.js server anyway.
+ */
+const SESSION_MARKER_COOKIE = "krishisetu_session";
+
+function setSessionMarker(): void {
+  if (typeof document === "undefined") return;
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${SESSION_MARKER_COOKIE}=1; Path=/; SameSite=Lax; Max-Age=${60 * 60 * 24 * 30}${secure}`;
+}
+
+function clearSessionMarker(): void {
+  if (typeof document === "undefined") return;
+  document.cookie = `${SESSION_MARKER_COOKIE}=; Path=/; SameSite=Lax; Max-Age=0`;
+}
+
 // ---------------------------------------------------------------------------
 // Token storage (localStorage, SSR-safe)
 // ---------------------------------------------------------------------------
@@ -64,10 +91,18 @@ export const tokenStorage = {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
     window.localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+    setSessionMarker();
   },
   setUser(user: UserPublic): void {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(USER_KEY, JSON.stringify(user));
+    // Also (re)assert the marker here, not just in setTokens. A session that
+    // predates the marker cookie — or one whose cookie expired before the
+    // 30-day refresh token did — would otherwise be bounced by middleware to
+    // /login, which would see it as authenticated and bounce it back: a loop.
+    // setUser only runs after the server has confirmed the session, so this
+    // is the right place to re-derive it.
+    setSessionMarker();
   },
   hasTokens(): boolean {
     return !!this.getAccessToken() && !!this.getRefreshToken();
@@ -77,6 +112,7 @@ export const tokenStorage = {
     window.localStorage.removeItem(ACCESS_TOKEN_KEY);
     window.localStorage.removeItem(REFRESH_TOKEN_KEY);
     window.localStorage.removeItem(USER_KEY);
+    clearSessionMarker();
   },
 };
 
@@ -84,14 +120,22 @@ export const tokenStorage = {
 // Core fetch wrapper
 // ---------------------------------------------------------------------------
 
-interface FetchOptions extends RequestInit {
+export interface FetchOptions extends RequestInit {
   /** Skip auth header (for login endpoints) */
   skipAuth?: boolean;
   /** Query parameters */
   query?: Record<string, string | number | boolean | undefined | null>;
 }
 
-async function apiFetch<T>(
+/**
+ * Exported because the domain API modules (disease, plots, insurance,
+ * marketplace, ndvi, schemes, soil-weather) and the payment/voice components
+ * all `import { apiFetch }` by name. It was never actually exported, so those
+ * imports have been resolving to undefined — routing a request through
+ * apiFetch is the only way to get the /api/v1 prefix, the bearer header and
+ * the 401-refresh-retry, so they need the real thing.
+ */
+export async function apiFetch<T>(
   path: string,
   options: FetchOptions = {},
 ): Promise<T> {
@@ -107,7 +151,16 @@ async function apiFetch<T>(
   }
 
   const finalHeaders = new Headers(headers);
-  if (!finalHeaders.has("Content-Type") && rest.body) {
+  // Only a string body is assumed to be JSON. Every JSON call site passes
+  // JSON.stringify(...), so this covers them all — while leaving FormData,
+  // Blob, URLSearchParams and ArrayBuffer bodies untouched.
+  //
+  // This matters for multipart: stamping application/json onto a FormData
+  // body stops the browser from generating the multipart boundary, and the
+  // server then sees a JSON content-type wrapping a multipart payload and
+  // rejects it. Written as "is it a string" rather than "is it not FormData"
+  // so it fails closed — a future binary body type can't be mislabelled.
+  if (!finalHeaders.has("Content-Type") && typeof rest.body === "string") {
     finalHeaders.set("Content-Type", "application/json");
   }
   if (!skipAuth) {
@@ -117,10 +170,15 @@ async function apiFetch<T>(
     }
   }
 
+  // No `credentials: "include"`. Auth here is Bearer-only, so cookies buy us
+  // nothing — but sending them made every write request look cookie-borne to
+  // the API's CSRF middleware, which then demanded an X-CSRF-Token header
+  // this client never sets. That is a guaranteed 403 on every POST/PATCH the
+  // moment the API and web app share a site; today it only "works" because
+  // differing ports keep the cookies from being attached.
   let response = await fetch(url.toString(), {
     ...rest,
     headers: finalHeaders,
-    credentials: "include",
   });
 
   // On 401, attempt a single refresh + retry
@@ -134,7 +192,6 @@ async function apiFetch<T>(
       response = await fetch(url.toString(), {
         ...rest,
         headers: finalHeaders,
-        credentials: "include",
       });
     }
   }
@@ -287,17 +344,30 @@ export const authApi = {
 
   /**
    * Complete the Google OAuth flow from the frontend callback page.
-   * Called by /app/auth/callback/page.tsx after the backend redirects
-   * with access_token + refresh_token in URL params.
+   *
+   * Called by /app/auth/callback/page.tsx with the single-use `code` from the
+   * backend redirect. The exchange response carries the token pair AND the
+   * user, so nothing is written to storage until the whole handshake has
+   * succeeded — the previous version stored 30-day tokens first and fetched
+   * /me afterwards, leaving a fully-credentialed browser sitting on the login
+   * page whenever that second call failed.
    */
-  async completeGoogleOAuth(
-    accessToken: string,
-    refreshToken: string,
-  ): Promise<UserPublic> {
-    tokenStorage.setTokens(accessToken, refreshToken);
-    const user = await apiFetch<UserPublic>("/me");
-    tokenStorage.setUser(user);
-    return user;
+  async completeGoogleOAuth(code: string): Promise<UserPublic> {
+    const data = await apiFetch<TokenPair>("/auth/google/exchange", {
+      method: "POST",
+      skipAuth: true,
+      body: JSON.stringify({ code }),
+    });
+
+    try {
+      tokenStorage.setTokens(data.access_token, data.refresh_token);
+      tokenStorage.setUser(data.user);
+      return data.user;
+    } catch (err) {
+      // Never leave a half-written session behind.
+      tokenStorage.clear();
+      throw err;
+    }
   },
 };
 

@@ -19,14 +19,12 @@ export const diseaseApi = {
     return apiFetch<DiseaseReport>(`/disease/reports/${id}`);
   },
   async uploadImage(formData: FormData): Promise<{ report_id: string }> {
-    const url = new URL("/disease/reports", process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000");
-    const token = typeof window !== "undefined" ? window.localStorage.getItem("krishisetu_access_token") : null;
-    const response = await fetch(url.toString(), {
+    // Routed through apiFetch so the request gets the /api/v1 prefix, the
+    // bearer token from tokenStorage, and the 401 refresh-and-retry.
+    // No Content-Type is set here — fetch generates the multipart boundary.
+    return apiFetch<{ report_id: string }>("/disease/reports", {
       method: "POST",
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       body: formData,
     });
-    if (!response.ok) throw new Error("Upload failed");
-    return response.json();
   },
 };

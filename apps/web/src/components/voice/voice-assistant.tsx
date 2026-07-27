@@ -10,7 +10,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
-import { apiClient } from "@/lib/api/client";
+import { apiFetch } from "@/lib/api/client";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -99,24 +99,12 @@ export function VoiceAssistant() {
           : "wav";
       formData.append("file", audioBlob, `audio.${ext}`);
 
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_BASE_URL}/voice/query`,
-        {
-          method: "POST",
-          body: formData,
-          credentials: "include",
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("krishisetu.access_token")}`,
-          },
-        },
-      );
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData?.error?.message || "Voice query failed");
-      }
-
-      const data: VoiceQueryResult = await response.json();
+      // No Content-Type header — apiFetch must leave it unset for FormData so
+      // fetch can generate the multipart boundary itself.
+      const data = await apiFetch<VoiceQueryResult>("/voice/query", {
+        method: "POST",
+        body: formData,
+      });
       setResult(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Voice processing failed");

@@ -38,13 +38,17 @@ const GOOGLE_ERROR_MESSAGES: Record<string, string> = {
   google_denied: "You cancelled the Google sign-in. Try again or use phone OTP.",
   google_auth_failed: "Google authentication failed. Please try again.",
   google_server_error: "A server error occurred during Google sign-in. Please try again.",
-  google_missing_tokens: "Incomplete Google sign-in. Please try again.",
+  google_missing_code: "Incomplete Google sign-in. Please try again.",
   google_completion_failed: "Could not complete Google sign-in. Please try again.",
+  google_invalid_callback: "Invalid Google callback. Please try again.",
 };
 
 export default function SignupPage() {
   const router = useRouter();
-  const { loginWithOtp, isLoading, error, clearError } = useAuthStore();
+  // isSubmitting, not isLoading: isLoading tracks session hydration and is
+  // true on first paint, which rendered every button on this page disabled
+  // behind a spinner before the user could touch anything.
+  const { loginWithOtp, isSubmitting, error, clearError } = useAuthStore();
 
   const [authMethod, setAuthMethod] = useState<AuthMethod>("otp");
   const [step, setStep] = useState<Step>("details");
@@ -235,8 +239,8 @@ export default function SignupPage() {
 
               {formError && <p className="text-sm text-red-600">{formError}</p>}
 
-              <Button onClick={handleSendOtp} className="w-full" disabled={isLoading}>
-                {isLoading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Sending OTP...</> : "Send OTP"}
+              <Button onClick={handleSendOtp} className="w-full" disabled={isSubmitting}>
+                {isSubmitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Sending OTP...</> : "Send OTP"}
               </Button>
 
               <div className="relative">
@@ -294,8 +298,8 @@ export default function SignupPage() {
               {error && <p className="text-sm text-red-600 text-center">{error}</p>}
 
               <Button onClick={() => handleVerifyOtp()} className="w-full"
-                disabled={otp.length !== 6 || isLoading}>
-                {isLoading
+                disabled={otp.length !== 6 || isSubmitting}>
+                {isSubmitting
                   ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating account...</>
                   : "Verify & Create Account"}
               </Button>
@@ -361,8 +365,8 @@ export default function SignupPage() {
                 {passwordError && <p className="text-sm text-red-600">{passwordError}</p>}
               </div>
 
-              <Button type="submit" className="w-full" disabled={isLoading}>
-                {isLoading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating...</> : "Create Account"}
+              <Button type="submit" className="w-full" disabled={isSubmitting}>
+                {isSubmitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating...</> : "Create Account"}
               </Button>
 
               <div className="grid grid-cols-2 gap-3">

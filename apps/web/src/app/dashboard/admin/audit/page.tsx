@@ -85,13 +85,24 @@ export default function AdminAuditPage() {
 
   const limit = 100;
 
+  const isAdmin = user?.role === "admin";
+
+  // Effects run on mount regardless of what render() returned, so the role gate
+  // further down does NOT stop them — without these guards every non-admin who
+  // lands here fires /audit/logs + /audit/stats, and each 403 writes an
+  // `authz.denied` event, polluting the very stats this page displays.
+  // NOTE: this is UX hygiene only. `user.role` is hydrated from localStorage,
+  // so this page must never be treated as an authz boundary — the server is
+  // the only thing enforcing admin access.
   useEffect(() => {
+    if (!isAdmin) return;
     void load();
-  }, [offset]);
+  }, [offset, isAdmin]);
 
   useEffect(() => {
+    if (!isAdmin) return;
     void loadStats();
-  }, []);
+  }, [isAdmin]);
 
   async function load() {
     setLoading(true);
@@ -121,7 +132,7 @@ export default function AdminAuditPage() {
   }
 
   // Gate by role (server also enforces this)
-  if (user?.role !== "admin") {
+  if (!isAdmin) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <Card className="max-w-md">
