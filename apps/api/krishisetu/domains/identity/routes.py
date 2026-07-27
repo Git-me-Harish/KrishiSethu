@@ -404,9 +404,9 @@ async def verify_aadhaar_otp(
     db: DBSession,
 ) -> AadhaarVerificationResponse:
     """Verify Aadhaar OTP and mark the user's Aadhaar as verified."""
-    from krishisetu.integrations.uidai import get_uidai_client
     from krishisetu.core.security import hash_aadhaar
     from krishisetu.domains.identity import repository as repo
+    from krishisetu.integrations.uidai import get_uidai_client
 
     client = get_uidai_client()
     result = await client.verify_otp(

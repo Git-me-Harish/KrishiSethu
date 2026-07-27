@@ -13,7 +13,6 @@ import asyncio
 import os
 from collections.abc import AsyncGenerator
 from typing import Any
-from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -59,9 +58,9 @@ os.environ.setdefault(
     "test-ml-service-token-must-be-at-least-32-characters",
 )
 
-from krishisetu.core.database import Base, get_db  # noqa: E402
-from krishisetu.core.redis import get_redis  # noqa: E402
-from krishisetu.main import app  # noqa: E402
+from krishisetu.core.database import get_db
+from krishisetu.core.redis import get_redis
+from krishisetu.main import app
 
 # Use the same database URL as the app
 TEST_DATABASE_URL = os.environ["DATABASE_URL"]
@@ -147,7 +146,6 @@ class RedisMock:
 
     def __init__(self) -> None:
         self._store: dict[str, tuple[str, float | None]] = {}
-        self._pipelined: list[tuple[str, tuple[Any, ...]]] = []
 
     async def get(self, key: str) -> str | None:
         entry = self._store.get(key)
@@ -201,43 +199,51 @@ class RedisMock:
         remaining = int(expiry - asyncio.get_event_loop().time())
         return max(0, remaining)
 
-    def pipeline(self):
-        return self
-
-    def execute(self):
-        # Simplistic: execute commands sequentially
-        return asyncio.gather(*[
-            self._execute_one(cmd, args) for cmd, args in self._pipelined
-        ])
-
-    async def _execute_one(self, cmd: str, args: tuple) -> Any:
-        method = getattr(self, cmd)
-        return await method(*args)
-
-    # Pipeline-specific methods that queue commands
-    def set(self, key, value, ex=None):  # type: ignore[no-redef]
-        # When called in pipeline context, return self for chaining
-        # (This is a simplification — real pipeline queues commands)
-        self._store[key] = (value, asyncio.get_event_loop().time() + ex if ex else None)
-        return self
-
-    def incr(self, key):  # type: ignore[no-redef]
-        val = self._store.get(key)
-        new_val = int(val[0]) + 1 if val else 1
-        self._store[key] = (str(new_val), val[1] if val else None)
-        return self
-
-    def expire(self, key, ttl):  # type: ignore[no-redef]
-        if key in self._store:
-            value, _ = self._store[key]
-            self._store[key] = (value, asyncio.get_event_loop().time() + ttl)
-        return self
+    def pipeline(self) -> RedisMockPipeline:
+        # A distinct object, not `self` — so pipeline chaining (`pipe.incr(key)`,
+        # sync, queues a command) can't collide with this class's own async
+        # `set`/`incr`/`expire` (awaited directly, e.g. by rate_limiter.py's
+        # circuit-breaker checks). Redefining those methods on RedisMock
+        # itself to be "sync when pipelined, async otherwise" doesn't work —
+        # Python keeps only the last definition — so a real pipeline needs to
+        # be its own type.
+        return RedisMockPipeline(self)
 
     async def ping(self) -> bool:
         return True
 
     async def close(self) -> None:
         pass
+
+
+class RedisMockPipeline:
+    """Minimal stand-in for a redis-py pipeline bound to a `RedisMock`.
+
+    Queues commands via the sync chaining API (`pipe.incr(key)`) and applies
+    them — in order, against the same underlying store — when `execute()` is
+    awaited, returning each command's result like a real pipeline does.
+    """
+
+    def __init__(self, redis: RedisMock) -> None:
+        self._redis = redis
+        self._queued: list[tuple[str, tuple[Any, ...]]] = []
+
+    def set(self, key: str, value: str, ex: int | None = None) -> RedisMockPipeline:
+        self._queued.append(("set", (key, value, ex)))
+        return self
+
+    def incr(self, key: str) -> RedisMockPipeline:
+        self._queued.append(("incr", (key,)))
+        return self
+
+    def expire(self, key: str, ttl: int) -> RedisMockPipeline:
+        self._queued.append(("expire", (key, ttl)))
+        return self
+
+    async def execute(self) -> list[Any]:
+        results = [await getattr(self._redis, cmd)(*args) for cmd, args in self._queued]
+        self._queued = []
+        return results
 
 
 @pytest_asyncio.fixture

@@ -203,7 +203,9 @@ async def list_diseases(
     crop: str | None = Query(default=None, description="Filter by crop slug, e.g., 'rice'"),
     disease_type: str | None = Query(
         default=None,
-        description="Filter by type: fungal, bacterial, viral, pest, nematode, nutrient, environmental",
+        description=(
+            "Filter by type: fungal, bacterial, viral, pest, nematode, nutrient, environmental"
+        ),
     ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),

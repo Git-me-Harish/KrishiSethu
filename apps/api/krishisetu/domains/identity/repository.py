@@ -13,15 +13,14 @@ the FastAPI dependency `get_db`).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select, update, func
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.core.security import hash_password
 from krishisetu.domains.identity.models import RefreshToken, User, UserRole
-
 
 # ---------------------------------------------------------------------------
 # User queries
@@ -139,7 +138,7 @@ async def update_last_login(db: AsyncSession, user_id: UUID) -> None:
     await db.execute(
         update(User)
         .where(User.id == user_id)
-        .values(last_login_at=datetime.now(timezone.utc))
+        .values(last_login_at=datetime.now(UTC))
     )
     await db.flush()
 
@@ -177,7 +176,7 @@ async def lock_account(
         update(User)
         .where(User.id == user_id)
         .values(
-            locked_until=datetime.now(timezone.utc)
+            locked_until=datetime.now(UTC)
             + timedelta(minutes=lock_duration_minutes)
         )
     )
@@ -275,7 +274,7 @@ async def revoke_refresh_token(
     await db.execute(
         update(RefreshToken)
         .where(RefreshToken.jti == jti)
-        .values(revoked_at=datetime.now(timezone.utc), revoked_reason=reason)
+        .values(revoked_at=datetime.now(UTC), revoked_reason=reason)
     )
     await db.flush()
     return True
@@ -303,7 +302,7 @@ async def revoke_all_user_tokens(
             RefreshToken.revoked_at.is_(None),
         )
         .values(
-            revoked_at=datetime.now(timezone.utc),
+            revoked_at=datetime.now(UTC),
             revoked_reason=reason,
         )
         .returning(RefreshToken.id)
@@ -318,7 +317,7 @@ async def cleanup_expired_tokens(db: AsyncSession) -> int:
 
     Called by a periodic Celery task. Returns the number of deleted rows.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    cutoff = datetime.now(UTC) - timedelta(days=30)
     result = await db.execute(
         RefreshToken.__table__.delete().where(RefreshToken.expires_at < cutoff)
     )

@@ -17,7 +17,7 @@ Key flows:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -25,23 +25,18 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.core.exceptions import (
-    ConflictError,
     NotFoundError,
-    ValidationError,
 )
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.farmer import repository as farmer_repo
-from krishisetu.domains.farmer.models import Plot
 from krishisetu.domains.soil_weather import repository as repo
 from krishisetu.domains.soil_weather.models import (
     SoilTest,
     SoilTestSource,
     WeatherAlert,
     WeatherAlertSeverity,
-    WeatherAlertStatus,
     WeatherAlertType,
     WeatherDataSource,
-    WeatherForecast,
     WeatherObservation,
 )
 from krishisetu.domains.soil_weather.schemas import (
@@ -55,13 +50,9 @@ from krishisetu.domains.soil_weather.schemas import (
     SoilTestResponse,
     WeatherAlertListResponse,
     WeatherAlertResponse,
-    WeatherAlertTypeEnum,
-    WeatherAlertSeverityEnum,
     WeatherHistoryResponse,
 )
 from krishisetu.integrations.imd import (
-    DailyForecast as IMDDailyForecast,
-    CurrentWeather as IMDCurrentWeather,
     get_imd_client,
 )
 from krishisetu.integrations.isric import get_isric_client
@@ -335,7 +326,11 @@ async def auto_populate_isric_soil_data(
         silt_pct=soil_data.silt_pct,
         soil_type=soil_data.soil_type,
         soil_texture=soil_data.soil_type,  # ISRIC gives texture class
-        notes=f"Auto-populated from ISRIC SoilGrids at coordinates ({centroid['lat']:.4f}, {centroid['lon']:.4f}). These are model predictions at 250m resolution, not actual lab tests.",
+        notes=(
+            f"Auto-populated from ISRIC SoilGrids at coordinates "
+            f"({centroid['lat']:.4f}, {centroid['lon']:.4f}). These are model "
+            "predictions at 250m resolution, not actual lab tests."
+        ),
     )
 
     logger.info(
@@ -372,7 +367,7 @@ async def sync_district_weather(
 
     # --- Fetch current weather ---
     current = await imd.get_current_weather(district, state, lat, lon)
-    source = WeatherDataSource.IMD if imd.is_live else WeatherDataSource.IMD  # synthetic still IMD-tagged
+    source = WeatherDataSource.IMD  # synthetic (dev) weather is still IMD-tagged
 
     # Try OWM as fallback if IMD failed and OWM is available
     if current is None:
@@ -413,7 +408,7 @@ async def sync_district_weather(
 
     # --- Fetch and upsert forecast ---
     forecasts = await imd.get_forecast(district, state, lat, lon, days=7)
-    issued_at = datetime.now(timezone.utc)
+    issued_at = datetime.now(UTC)
 
     for fc in forecasts:
         await repo.upsert_weather_forecast(
@@ -498,7 +493,7 @@ async def _get_current_weather_for_district(
     latest = await repo.get_latest_weather_observation(db, district, state)
 
     if latest:
-        age = datetime.now(timezone.utc) - latest.observed_at
+        age = datetime.now(UTC) - latest.observed_at
         if age > timedelta(hours=2):
             # Trigger sync (best-effort)
             try:
@@ -776,7 +771,8 @@ async def _check_district_forecast(
 
     for fc in forecasts:
         # Heat wave check
-        if fc.temp_max_c and fc.temp_max_c >= ALERT_THRESHOLDS[WeatherAlertType.HEAT_WAVE]["temp_max_c"]:
+        heat_wave_threshold = ALERT_THRESHOLDS[WeatherAlertType.HEAT_WAVE]["temp_max_c"]
+        if fc.temp_max_c and fc.temp_max_c >= heat_wave_threshold:
             severity = _get_severity_by_threshold(
                 fc.temp_max_c,
                 ALERT_THRESHOLDS[WeatherAlertType.HEAT_WAVE]["severity_by_temp"],
@@ -787,12 +783,15 @@ async def _check_district_forecast(
                 state=state,
                 alert_type=WeatherAlertType.HEAT_WAVE,
                 severity=severity,
-                effective_at=datetime.combine(fc.forecast_date, datetime.min.time(), tzinfo=timezone.utc),
+                effective_at=datetime.combine(fc.forecast_date, datetime.min.time(), tzinfo=UTC),
                 expires_at=datetime.combine(
-                    fc.forecast_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+                    fc.forecast_date + timedelta(days=1), datetime.min.time(), tzinfo=UTC
                 ),
                 title=f"Heat Wave Warning for {district}, {state}",
-                description=f"Maximum temperature expected to reach {fc.temp_max_c}°C on {fc.forecast_date}.",
+                description=(
+                    f"Maximum temperature expected to reach {fc.temp_max_c}°C "
+                    f"on {fc.forecast_date}."
+                ),
                 recommended_actions=(
                     "Irrigate crops in early morning or evening. "
                     "Provide shade for sensitive crops. "
@@ -803,7 +802,8 @@ async def _check_district_forecast(
                 alerts.append(alert)
 
         # Heavy rain check
-        if fc.precipitation_mm and fc.precipitation_mm >= ALERT_THRESHOLDS[WeatherAlertType.HEAVY_RAIN]["precipitation_mm"]:
+        heavy_rain_threshold = ALERT_THRESHOLDS[WeatherAlertType.HEAVY_RAIN]["precipitation_mm"]
+        if fc.precipitation_mm and fc.precipitation_mm >= heavy_rain_threshold:
             severity = _get_severity_by_threshold(
                 fc.precipitation_mm,
                 ALERT_THRESHOLDS[WeatherAlertType.HEAVY_RAIN]["severity_by_mm"],
@@ -814,12 +814,15 @@ async def _check_district_forecast(
                 state=state,
                 alert_type=WeatherAlertType.HEAVY_RAIN,
                 severity=severity,
-                effective_at=datetime.combine(fc.forecast_date, datetime.min.time(), tzinfo=timezone.utc),
+                effective_at=datetime.combine(fc.forecast_date, datetime.min.time(), tzinfo=UTC),
                 expires_at=datetime.combine(
-                    fc.forecast_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+                    fc.forecast_date + timedelta(days=1), datetime.min.time(), tzinfo=UTC
                 ),
                 title=f"Heavy Rainfall Warning for {district}, {state}",
-                description=f"Heavy rainfall of {fc.precipitation_mm}mm expected on {fc.forecast_date}.",
+                description=(
+                    f"Heavy rainfall of {fc.precipitation_mm}mm expected "
+                    f"on {fc.forecast_date}."
+                ),
                 recommended_actions=(
                     "Ensure proper drainage in fields. "
                     "Postpone pesticide and fertilizer application. "
@@ -831,7 +834,8 @@ async def _check_district_forecast(
                 alerts.append(alert)
 
         # Frost check (winter months)
-        if fc.temp_min_c and fc.temp_min_c <= ALERT_THRESHOLDS[WeatherAlertType.FROST]["temp_min_c"]:
+        frost_threshold = ALERT_THRESHOLDS[WeatherAlertType.FROST]["temp_min_c"]
+        if fc.temp_min_c and fc.temp_min_c <= frost_threshold:
             severity = _get_severity_by_threshold(
                 fc.temp_min_c,
                 ALERT_THRESHOLDS[WeatherAlertType.FROST]["severity_by_temp"],
@@ -843,12 +847,15 @@ async def _check_district_forecast(
                 state=state,
                 alert_type=WeatherAlertType.FROST,
                 severity=severity,
-                effective_at=datetime.combine(fc.forecast_date, datetime.min.time(), tzinfo=timezone.utc),
+                effective_at=datetime.combine(fc.forecast_date, datetime.min.time(), tzinfo=UTC),
                 expires_at=datetime.combine(
-                    fc.forecast_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+                    fc.forecast_date + timedelta(days=1), datetime.min.time(), tzinfo=UTC
                 ),
                 title=f"Frost Warning for {district}, {state}",
-                description=f"Minimum temperature expected to drop to {fc.temp_min_c}°C on {fc.forecast_date}.",
+                description=(
+                    f"Minimum temperature expected to drop to {fc.temp_min_c}°C "
+                    f"on {fc.forecast_date}."
+                ),
                 recommended_actions=(
                     "Cover sensitive crops with plastic or straw. "
                     "Apply light irrigation in the evening to retain soil heat. "
@@ -860,7 +867,8 @@ async def _check_district_forecast(
                 alerts.append(alert)
 
         # High wind check
-        if fc.wind_speed_kmph and fc.wind_speed_kmph >= ALERT_THRESHOLDS[WeatherAlertType.HIGH_WIND]["wind_speed_kmph"]:
+        high_wind_threshold = ALERT_THRESHOLDS[WeatherAlertType.HIGH_WIND]["wind_speed_kmph"]
+        if fc.wind_speed_kmph and fc.wind_speed_kmph >= high_wind_threshold:
             severity = _get_severity_by_threshold(
                 fc.wind_speed_kmph,
                 ALERT_THRESHOLDS[WeatherAlertType.HIGH_WIND]["severity_by_speed"],
@@ -871,12 +879,15 @@ async def _check_district_forecast(
                 state=state,
                 alert_type=WeatherAlertType.HIGH_WIND,
                 severity=severity,
-                effective_at=datetime.combine(fc.forecast_date, datetime.min.time(), tzinfo=timezone.utc),
+                effective_at=datetime.combine(fc.forecast_date, datetime.min.time(), tzinfo=UTC),
                 expires_at=datetime.combine(
-                    fc.forecast_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+                    fc.forecast_date + timedelta(days=1), datetime.min.time(), tzinfo=UTC
                 ),
                 title=f"High Wind Warning for {district}, {state}",
-                description=f"Wind speeds of {fc.wind_speed_kmph} km/h expected on {fc.forecast_date}.",
+                description=(
+                    f"Wind speeds of {fc.wind_speed_kmph} km/h expected "
+                    f"on {fc.forecast_date}."
+                ),
                 recommended_actions=(
                     "Stake tall crops to prevent lodging. "
                     "Secure greenhouses and protective structures. "
@@ -993,7 +1004,9 @@ async def get_plot_weather_summary(
     if not plot or plot.farmer_id != farmer_id:
         raise NotFoundError("Plot", str(plot_id))
 
-    current = await _get_current_weather_for_district(db, plot.district, plot.state, plot_id=plot_id)
+    current = await _get_current_weather_for_district(
+        db, plot.district, plot.state, plot_id=plot_id
+    )
     forecast_resp = await _get_forecast_for_district(db, plot.district, plot.state, plot_id=plot_id)
     alerts = await repo.get_active_alerts_for_district(db, plot.district, plot.state)
 

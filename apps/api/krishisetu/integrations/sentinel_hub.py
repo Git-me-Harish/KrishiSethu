@@ -25,7 +25,7 @@ import hashlib
 import math
 import random
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -86,7 +86,7 @@ class SentinelHubClient:
     In development, generates synthetic NDVI data based on plot characteristics.
     """
 
-    TOKEN_URL = "https://services.sentinel-hub.com/oauth/token"
+    TOKEN_URL = "https://services.sentinel-hub.com/oauth/token"  # noqa: S105 -- URL, not a credential
     PROCESS_URL = "https://services.sentinel-hub.com/api/v1/process"
 
     def __init__(self) -> None:
@@ -144,7 +144,7 @@ class SentinelHubClient:
 
     async def _get_token(self) -> str:
         """Get OAuth2 access token from Sentinel Hub."""
-        if self._token and self._token_expires_at and datetime.now(timezone.utc) < self._token_expires_at:
+        if self._token and self._token_expires_at and datetime.now(UTC) < self._token_expires_at:
             return self._token
 
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -153,7 +153,9 @@ class SentinelHubClient:
                 data={
                     "grant_type": "client_credentials",
                     "client_id": self.client_id.get_secret_value() if self.client_id else "",
-                    "client_secret": self.client_secret.get_secret_value() if self.client_secret else "",
+                    "client_secret": (
+                        self.client_secret.get_secret_value() if self.client_secret else ""
+                    ),
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
@@ -161,7 +163,7 @@ class SentinelHubClient:
         data = response.json()
 
         self._token = data["access_token"]
-        self._token_expires_at = datetime.now(timezone.utc) + timedelta(
+        self._token_expires_at = datetime.now(UTC) + timedelta(
             seconds=data.get("expires_in", 3600) - 60  # 1 min buffer
         )
         return self._token
@@ -179,7 +181,7 @@ class SentinelHubClient:
         Requires: pip install rasterio (included in ML service deps)
         """
         token = await self._get_token()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         time_from = (now - timedelta(days=max_days_back)).strftime("%Y-%m-%d")
         time_to = now.strftime("%Y-%m-%d")
 
@@ -279,18 +281,16 @@ class SentinelHubClient:
         The TIFF contains 3 bands in order: B04 (Red), B08 (NIR), SCL.
         Uses rasterio's MemoryFile to parse in-memory TIFF data.
         """
-        import io
         import numpy as np
 
         try:
-            import rasterio
             from rasterio.io import MemoryFile
-        except ImportError:
+        except ImportError as exc:
             logger.warning(
                 "sentinel.rasterio_not_installed",
                 note="Install rasterio: pip install rasterio. Falling back to synthetic.",
             )
-            raise ImportError("rasterio is required for Sentinel Hub TIFF parsing")
+            raise ImportError("rasterio is required for Sentinel Hub TIFF parsing") from exc
 
         # Parse the TIFF in memory
         with MemoryFile(tiff_bytes) as memfile:
@@ -350,14 +350,18 @@ class SentinelHubClient:
         - Deterministic seed (stable per plot per week)
         - Random pixel variation (realistic raster)
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         month = now.month
 
         # Deterministic seed per (plot, week)
         week_str = now.strftime("%Y-W%W")
         seed_str = f"{plot_id}:{week_str}"
-        seed = int(hashlib.md5(seed_str.encode()).hexdigest(), 16) % (2**32)
-        rng = random.Random(seed)
+        # Non-cryptographic: seeds a deterministic RNG for synthetic NDVI
+        # data (dev/fallback mode), not used for any security purpose.
+        seed = int(
+            hashlib.md5(seed_str.encode(), usedforsecurity=False).hexdigest(), 16
+        ) % (2**32)
+        rng = random.Random(seed)  # noqa: S311 -- synthetic data generation, not security
 
         # Base NDVI by month (Indian cropping seasons)
         # Kharif (Jun-Oct): Peak vegetation

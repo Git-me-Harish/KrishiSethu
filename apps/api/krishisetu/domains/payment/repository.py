@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, desc, func, select, text, update
+from sqlalchemy import and_, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.domains.payment.models import (
     Payment,
+    PaymentProvider,
     PaymentStatus,
     PaymentType,
     PaymentWebhook,
-    PaymentProvider,
 )
 
 
@@ -196,7 +196,7 @@ async def mark_payment_pending(
         status=PaymentStatus.PENDING.value,
         provider_order_id=provider_order_id,
         upi_intent_url=upi_intent_url,
-        updated_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(UTC),
     )
 
 
@@ -224,7 +224,7 @@ async def mark_payment_captured_if_pending(
     non-escrow auto-release in services._capture_payment, since no money has
     moved at that point.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     result = await db.execute(
         update(Payment)
         .where(
@@ -262,7 +262,7 @@ async def mark_payment_failed(
         payment_id,
         status=PaymentStatus.FAILED.value,
         notes={"failure_reason": reason} if reason else None,
-        updated_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(UTC),
     )
 
 
@@ -276,7 +276,7 @@ async def release_escrow(
     Compare-and-set on `captured`, so a payment can only ever be released
     once even if two callers race (webhook + JS callback).
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await db.execute(
         update(Payment)
         .where(
@@ -320,8 +320,8 @@ async def process_refund(
         status=new_status,
         amount_refunded=new_refunded,
         refund_reason=reason,
-        refunded_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
+        refunded_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
     )
 
 
@@ -387,6 +387,6 @@ async def mark_webhook_processed(db: AsyncSession, webhook_id: UUID) -> None:
     await db.execute(
         update(PaymentWebhook)
         .where(PaymentWebhook.id == webhook_id)
-        .values(processed=True, processed_at=datetime.now(timezone.utc))
+        .values(processed=True, processed_at=datetime.now(UTC))
     )
     await db.flush()

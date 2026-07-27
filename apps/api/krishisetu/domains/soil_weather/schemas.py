@@ -16,11 +16,9 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -67,17 +65,29 @@ class SoilTestCreate(BaseModel):
     """Request body for POST /plots/{id}/soil-tests (manual entry)."""
 
     test_date: date = Field(..., description="Date the soil sample was collected")
-    lab_name: str | None = Field(default=None, max_length=255, description="Lab that performed the test")
+    lab_name: str | None = Field(
+        default=None, max_length=255, description="Lab that performed the test"
+    )
 
     # Nutrients (optional — farmer may not have all values)
-    nitrogen_n: Decimal | None = Field(default=None, ge=0, le=1000, description="Available N (kg/ha)")
-    phosphorus_p: Decimal | None = Field(default=None, ge=0, le=1000, description="Available P (kg/ha, as P2O5)")
-    potassium_k: Decimal | None = Field(default=None, ge=0, le=1000, description="Available K (kg/ha, as K2O)")
+    nitrogen_n: Decimal | None = Field(
+        default=None, ge=0, le=1000, description="Available N (kg/ha)"
+    )
+    phosphorus_p: Decimal | None = Field(
+        default=None, ge=0, le=1000, description="Available P (kg/ha, as P2O5)"
+    )
+    potassium_k: Decimal | None = Field(
+        default=None, ge=0, le=1000, description="Available K (kg/ha, as K2O)"
+    )
 
     # Chemistry
     ph: Decimal | None = Field(default=None, ge=0, le=14, description="Soil pH (0-14)")
-    electrical_conductivity: Decimal | None = Field(default=None, ge=0, le=20, description="EC (dS/m)")
-    organic_carbon: Decimal | None = Field(default=None, ge=0, le=100, description="Organic carbon (%)")
+    electrical_conductivity: Decimal | None = Field(
+        default=None, ge=0, le=20, description="EC (dS/m)"
+    )
+    organic_carbon: Decimal | None = Field(
+        default=None, ge=0, le=100, description="Organic carbon (%)"
+    )
 
     # Texture (must sum to 100 if provided)
     clay_pct: Decimal | None = Field(default=None, ge=0, le=100)
@@ -105,7 +115,8 @@ class SoilTestCreate(BaseModel):
                 )
         elif len(provided) > 0 and len(provided) < 3:
             raise ValueError(
-                "If any texture percentage is provided, all three (clay, sand, silt) must be provided"
+                "If any texture percentage is provided, all three "
+                "(clay, sand, silt) must be provided"
             )
         return self
 

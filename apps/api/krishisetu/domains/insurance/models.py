@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import ClassVar
 from uuid import UUID
 
 from sqlalchemy import (
@@ -36,11 +36,11 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from krishisetu.core.database import Base
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -209,7 +209,7 @@ class InsuranceProduct(Base):
     )
 
     # Relationship
-    policies: Mapped[list["InsurancePolicy"]] = relationship(
+    policies: Mapped[list[InsurancePolicy]] = relationship(
         "InsurancePolicy", back_populates="product"
     )
 
@@ -285,7 +285,7 @@ class InsurancePolicy(Base):
     sum_insured: Mapped[Decimal] = mapped_column(
         Numeric(12, 2),
         nullable=False,
-        comment="Total sum insured (sum_insured_per_ha × area_ha)",
+        comment="Total sum insured (sum_insured_per_ha x area_ha)",
     )
     area_insured_ha: Mapped[Decimal] = mapped_column(
         Numeric(10, 4), nullable=False,
@@ -344,7 +344,7 @@ class InsurancePolicy(Base):
 
     # Relationships
     product: Mapped[InsuranceProduct] = relationship("InsuranceProduct", back_populates="policies")
-    claims: Mapped[list["InsuranceClaim"]] = relationship(
+    claims: Mapped[list[InsuranceClaim]] = relationship(
         "InsuranceClaim", back_populates="policy", cascade="all, delete-orphan"
     )
 
@@ -500,7 +500,7 @@ class InsuranceClaim(Base):
     policy: Mapped[InsurancePolicy] = relationship(
         "InsurancePolicy", back_populates="claims"
     )
-    evidence: Mapped[list["ClaimEvidence"]] = relationship(
+    evidence: Mapped[list[ClaimEvidence]] = relationship(
         "ClaimEvidence", back_populates="claim", cascade="all, delete-orphan"
     )
 
@@ -550,7 +550,7 @@ class ClaimEvidence(Base):
     """
 
     __tablename__ = "claim_evidence"
-    __table_args__ = {"schema": "insurance"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "insurance"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

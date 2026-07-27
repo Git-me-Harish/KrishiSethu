@@ -79,8 +79,8 @@ def _load_key(secret: str) -> bytes:
         decoded = base64.b64decode(secret, validate=True)
         if len(decoded) == _KEY_SIZE:
             return decoded
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("encryption.key_not_base64", error=str(exc))
 
     raw_bytes = secret.encode("utf-8")
     if len(raw_bytes) != _KEY_SIZE:
@@ -233,7 +233,7 @@ class EncryptedString(TypeDecorator[str | None]):
     cache_ok = True
 
     def __init__(self, length: int = 512, *args: Any, **kwargs: Any) -> None:
-        super().__init__(length=length, *args, **kwargs)
+        super().__init__(*args, length=length, **kwargs)
 
     def process_bind_param(self, value: str | None, dialect: Any) -> str | None:
         """Encrypt on write."""
@@ -261,7 +261,7 @@ class EncryptedUUID(TypeDecorator[str | None]):
     cache_ok = True
 
     def __init__(self, length: int = 256, *args: Any, **kwargs: Any) -> None:
-        super().__init__(length=length, *args, **kwargs)
+        super().__init__(*args, length=length, **kwargs)
 
     def process_bind_param(self, value: Any, dialect: Any) -> str | None:
         if value is None:
@@ -279,11 +279,11 @@ class EncryptedUUID(TypeDecorator[str | None]):
 
 # Re-export PGUUID so callers don't accidentally import the wrong UUID
 __all__ = [
-    "EncryptionError",
+    "PGUUID",
     "EncryptedString",
     "EncryptedUUID",
-    "encrypt_field",
+    "EncryptionError",
     "decrypt_field",
+    "encrypt_field",
     "is_encrypted",
-    "PGUUID",
 ]

@@ -24,16 +24,16 @@ Create Date: 2026-07-19
 """
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 from decimal import Decimal
 
 from alembic import op
 import sqlalchemy as sa
 
 revision: str = "0014"
-down_revision: Union[str, None] = "0013"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "0013"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 SCHEMES = [
@@ -479,5 +479,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # codes is built from the static SCHEMES list above, not user input
     codes = ", ".join(f"'{s['code']}'" for s in SCHEMES)
-    op.execute(f"DELETE FROM schemes.scheme_catalog WHERE code IN ({codes})")
+    op.execute(f"DELETE FROM schemes.scheme_catalog WHERE code IN ({codes})")  # noqa: S608

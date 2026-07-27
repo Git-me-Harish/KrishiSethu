@@ -27,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -122,7 +122,7 @@ class UIDAIClient:
         try:
             validated = validate_aadhaar(aadhaar_number)
         except ValueError as e:
-            raise ValueError(f"Invalid Aadhaar number: {e}")
+            raise ValueError(f"Invalid Aadhaar number: {e}") from e
 
         # Check rate limits
         await self._check_rate_limits(validated)
@@ -147,7 +147,7 @@ class UIDAIClient:
         try:
             validated = validate_aadhaar(aadhaar_number)
         except ValueError as e:
-            raise ValueError(f"Invalid Aadhaar number: {e}")
+            raise ValueError(f"Invalid Aadhaar number: {e}") from e
 
         if self.is_live:
             return await self._verify_otp_live(validated, otp, transaction_id)
@@ -186,7 +186,7 @@ class UIDAIClient:
                 )
         except httpx.HTTPError as e:
             logger.error("uidai.send_otp.network_error", error=str(e))
-            raise RuntimeError(f"UIDAI API unavailable: {e}")
+            raise RuntimeError(f"UIDAI API unavailable: {e}") from e
 
         if response.status_code != 200:
             error_data = response.json()
@@ -196,8 +196,6 @@ class UIDAIClient:
                 error=error_data,
             )
             raise RuntimeError(f"UIDAI API error: {error_data.get('message', 'Unknown')}")
-
-        data = response.json()
 
         # Store transaction ID in Redis for verification step
         redis = await get_redis()
@@ -216,7 +214,7 @@ class UIDAIClient:
         return AadhaarOTPSent(
             transaction_id=transaction_id,
             message="OTP sent to your registered mobile number",
-            sent_at=datetime.now(timezone.utc),
+            sent_at=datetime.now(UTC),
         )
 
     async def _verify_otp_live(
@@ -264,7 +262,7 @@ class UIDAIClient:
                 )
         except httpx.HTTPError as e:
             logger.error("uidai.verify_otp.network_error", error=str(e))
-            raise RuntimeError(f"UIDAI API unavailable: {e}")
+            raise RuntimeError(f"UIDAI API unavailable: {e}") from e
 
         data = response.json()
 
@@ -327,7 +325,7 @@ class UIDAIClient:
 
         # Log the OTP (visible in API logs — same as phone OTP)
         print(f"\n{'=' * 60}")
-        print(f"Aadhaar e-KYC OTP")
+        print("Aadhaar e-KYC OTP")
         print(f"Masked Aadhaar: XXXX-XXXX-{aadhaar[-4:]}")
         print(f"Transaction ID: {transaction_id}")
         print(f"OTP: {test_otp}")
@@ -342,7 +340,7 @@ class UIDAIClient:
         return AadhaarOTPSent(
             transaction_id=transaction_id,
             message="[DEV] OTP logged to console. Check API logs.",
-            sent_at=datetime.now(timezone.utc),
+            sent_at=datetime.now(UTC),
         )
 
     async def _verify_otp_synthetic(
@@ -371,7 +369,7 @@ class UIDAIClient:
         await redis.incr(attempts_key)
         await redis.expire(attempts_key, self.OTP_TTL_SECONDS)
 
-        if otp == stored_otp:
+        if aadhaar == stored_aadhaar and otp == stored_otp:
             # Success
             await redis.delete(f"uidai:txn:{transaction_id}")
             await redis.delete(attempts_key)
@@ -438,7 +436,7 @@ class UIDAIClient:
         from krishisetu.core.exceptions import RateLimitExceededError
 
         redis = await get_redis()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         hour_key = f"uidai:rl:{aadhaar[-4:]}:hour:{now.strftime('%Y%m%d%H')}"
         day_key = f"uidai:rl:{aadhaar[-4:]}:day:{now.strftime('%Y%m%d')}"

@@ -17,16 +17,17 @@ Security notes:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
+from typing import ClassVar
 from uuid import UUID
 
-from sqlalchemy import DateTime, Integer, String, Boolean, func
-from krishisetu.core.types import make_enum_type
+from sqlalchemy import Boolean, DateTime, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from krishisetu.core.database import Base
+from krishisetu.core.types import make_enum_type
 
 
 class UserRole(str, Enum):
@@ -51,7 +52,7 @@ class User(Base):
     """
 
     __tablename__ = "users"
-    __table_args__ = {"schema": "identity"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "identity"}
 
     # --- Identity ---
     id: Mapped[UUID] = mapped_column(
@@ -171,9 +172,9 @@ class User(Base):
         if self.locked_until is None:
             return False
         # Compare with current UTC time
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        return datetime.now(timezone.utc) < self.locked_until
+        return datetime.now(UTC) < self.locked_until
 
     @property
     def is_otp_only(self) -> bool:
@@ -203,7 +204,7 @@ class RefreshToken(Base):
     """
 
     __tablename__ = "refresh_tokens"
-    __table_args__ = {"schema": "identity"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "identity"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -245,7 +246,10 @@ class RefreshToken(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
-        comment="NULL if active; set when token is revoked (logout, rotation, or session invalidation)",
+        comment=(
+            "NULL if active; set when token is revoked "
+            "(logout, rotation, or session invalidation)"
+        ),
     )
     revoked_reason: Mapped[str | None] = mapped_column(
         String(50),
@@ -264,9 +268,9 @@ class RefreshToken(Base):
 
     @property
     def is_expired(self) -> bool:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        return datetime.now(timezone.utc) >= self.expires_at
+        return datetime.now(UTC) >= self.expires_at
 
     @property
     def is_valid(self) -> bool:

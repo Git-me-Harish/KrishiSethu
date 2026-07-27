@@ -16,8 +16,7 @@ Design decisions:
 from __future__ import annotations
 
 import secrets
-import string
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
@@ -80,7 +79,7 @@ def create_access_token(
     - exp: expiration (Unix timestamp)
     - extra_claims: any additional claims passed by caller
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expire = now + timedelta(minutes=settings().JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
     payload: dict[str, Any] = {
         "sub": str(user_id),
@@ -109,7 +108,7 @@ def create_refresh_token(user_id: UUID | str) -> tuple[str, str]:
     Refresh tokens do NOT carry role claims — they are only used to obtain
     new access tokens, which then carry the role.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expire = now + timedelta(days=settings().JWT_REFRESH_TOKEN_EXPIRE_DAYS)
     jti = secrets.token_urlsafe(32)
     payload: dict[str, Any] = {
@@ -218,7 +217,7 @@ def normalize_indian_phone(phone: str) -> str:
     if len(digits) != 10:
         raise ValueError(f"Phone number must be 10 digits, got {len(digits)}")
 
-    if not digits[0] in "6789":
+    if digits[0] not in "6789":
         raise ValueError("Indian mobile numbers must start with 6, 7, 8, or 9")
 
     return digits

@@ -24,7 +24,6 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.core.exceptions import (
-    ConflictError,
     NotFoundError,
     ValidationError,
 )
@@ -62,11 +61,6 @@ from krishisetu.domains.farmer.officer_scope import (
     resolve_officer_jurisdiction,
 )
 from krishisetu.domains.identity.models import User
-from krishisetu.domains.identity.permissions import (
-    PERM_DISEASE_REPORT_READ_DISTRICT,
-    PERM_DISEASE_REPORT_REVIEW,
-    PERM_DISEASE_REPORT_SUBMIT,
-)
 
 logger = get_logger(__name__)
 

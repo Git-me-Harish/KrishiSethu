@@ -11,26 +11,28 @@ Handles:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, desc, func, select, text, update
+from sqlalchemy import and_, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from krishisetu.core.logging import get_logger
 from krishisetu.domains.soil_weather.models import (
     SoilTest,
     SoilTestSource,
     WeatherAlert,
+    WeatherAlertSeverity,
     WeatherAlertStatus,
     WeatherAlertType,
-    WeatherAlertSeverity,
     WeatherDataSource,
     WeatherForecast,
     WeatherObservation,
 )
 
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Soil test queries
@@ -200,7 +202,8 @@ async def upsert_weather_observation(
     (district, state, observed_at, source). If a row already exists for
     these values, it's updated.
     """
-    # Use raw SQL for ON CONFLICT (SQLAlchemy 2.0 supports this via insert().on_conflict_do_update())
+    # Use raw SQL for ON CONFLICT (SQLAlchemy 2.0 supports this via
+    # insert().on_conflict_do_update())
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     stmt = pg_insert(WeatherObservation).values(
@@ -304,7 +307,7 @@ async def list_weather_history(
     page_size: int = 100,
 ) -> tuple[list[WeatherObservation], int]:
     """List weather observations for a district, most recent first."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
 
     count_query = (
         select(func.count(WeatherObservation.id))
@@ -434,8 +437,13 @@ async def upsert_weather_forecast(
                 agromet_advisory=agromet_advisory,
                 raw_data=raw_data,
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "soil_weather.upsert_forecast_failed",
+            district=district,
+            state=state,
+            error=str(exc),
+        )
     return None
 
 
@@ -528,7 +536,7 @@ async def get_active_alerts_for_district(
     db: AsyncSession, district: str, state: str
 ) -> list[WeatherAlert]:
     """Get all active alerts for a district."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     query = (
         select(WeatherAlert)
         .where(
@@ -552,7 +560,7 @@ async def get_active_alerts_for_districts(
     """Get active alerts for multiple districts (batch query)."""
     if not districts:
         return []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     from sqlalchemy import or_
 
@@ -588,7 +596,7 @@ async def expire_old_alerts(db: AsyncSession) -> int:
     Called by Celery Beat every hour.
     Returns the number of alerts marked expired.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     result = await db.execute(
         update(WeatherAlert)
         .where(
@@ -636,7 +644,7 @@ async def update_alert_notification_count(
     db: AsyncSession, alert_id: UUID, count: int
 ) -> None:
     """Update the notifications_sent counter after dispatching."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await db.execute(
         update(WeatherAlert)
         .where(WeatherAlert.id == alert_id)

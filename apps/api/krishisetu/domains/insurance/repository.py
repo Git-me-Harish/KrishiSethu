@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, desc, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from krishisetu.domains.insurance.models import (
     ClaimEvidence,
@@ -20,7 +19,6 @@ from krishisetu.domains.insurance.models import (
     InsuranceProduct,
     PolicyStatus,
 )
-
 
 # ---------------------------------------------------------------------------
 # Product queries
@@ -41,7 +39,9 @@ async def list_products(
 ) -> tuple[list[InsuranceProduct], int]:
     """List insurance products with optional filters."""
     query = select(InsuranceProduct).where(InsuranceProduct.is_active == is_active)
-    count_query = select(func.count(InsuranceProduct.id)).where(InsuranceProduct.is_active == is_active)
+    count_query = select(func.count(InsuranceProduct.id)).where(
+        InsuranceProduct.is_active == is_active
+    )
 
     if state:
         query = query.where(InsuranceProduct.state == state)
@@ -61,7 +61,11 @@ async def list_products(
 
     total = (await db.execute(count_query)).scalar_one()
     offset = (page - 1) * page_size
-    query = query.order_by(InsuranceProduct.state, InsuranceProduct.crop_name).offset(offset).limit(page_size)
+    query = (
+        query.order_by(InsuranceProduct.state, InsuranceProduct.crop_name)
+        .offset(offset)
+        .limit(page_size)
+    )
     result = await db.execute(query)
     return list(result.scalars().all()), total
 
@@ -95,7 +99,7 @@ async def find_product_for_plot(
         .where(
             and_(
                 InsuranceProduct.state == plot_state,
-                InsuranceProduct.is_active == True,
+                InsuranceProduct.is_active.is_(True),
             )
         )
         .order_by(InsuranceProduct.crop_name)
@@ -166,7 +170,9 @@ async def get_policy_by_id(
                pr.claim_cutoff_yield, pr.description as product_description,
                pr.is_active as product_is_active,
                (SELECT COUNT(*) FROM insurance.insurance_claims c
-                WHERE c.policy_id = p.id AND c.status IN ('draft', 'submitted', 'under_review', 'evidence_requested')) as active_claims_count
+                WHERE c.policy_id = p.id
+                  AND c.status IN ('draft', 'submitted', 'under_review', 'evidence_requested')
+               ) as active_claims_count
         FROM insurance.insurance_policies p
         LEFT JOIN insurance.insurance_products pr ON pr.id = p.product_id
         WHERE p.id = :policy_id
@@ -213,7 +219,9 @@ async def list_policies_by_farmer(
                pr.claim_cutoff_yield, pr.description as product_description,
                pr.is_active as product_is_active,
                (SELECT COUNT(*) FROM insurance.insurance_claims c
-                WHERE c.policy_id = p.id AND c.status IN ('draft', 'submitted', 'under_review', 'evidence_requested')) as active_claims_count
+                WHERE c.policy_id = p.id
+                  AND c.status IN ('draft', 'submitted', 'under_review', 'evidence_requested')
+               ) as active_claims_count
         FROM insurance.insurance_policies p
         LEFT JOIN insurance.insurance_products pr ON pr.id = p.product_id
         WHERE p.farmer_id = :farmer_id
@@ -244,10 +252,10 @@ async def update_policy_premium_payment(
         .where(InsurancePolicy.id == policy_id)
         .values(
             premium_paid=True,
-            premium_paid_at=datetime.now(timezone.utc),
+            premium_paid_at=datetime.now(UTC),
             payment_reference=payment_reference,
             status=PolicyStatus.ACTIVE.value,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
         )
     )
     await db.flush()
@@ -439,7 +447,7 @@ async def list_claims_for_insurer(
         {insurer_clause}
         ORDER BY c.submitted_at ASC
         LIMIT :limit OFFSET :offset
-    """)
+    """)  # noqa: S608 -- insurer_clause is a fixed fragment; value is bound via params
     params: dict[str, Any] = {"limit": page_size, "offset": offset}
     if insurer_name:
         params["insurer_name"] = insurer_name
@@ -466,12 +474,14 @@ async def update_claim(
     if "claim_type" in updates and hasattr(updates["claim_type"], "value"):
         updates["claim_type"] = updates["claim_type"].value
 
+    # set_clauses only ever uses keys from `allowed` above; values are bound
+    # via params, so no user-controlled string reaches the SQL text.
     set_clauses = ", ".join(f"{k} = :{k}" for k in updates)
     query = text(f"""
         UPDATE insurance.insurance_claims
         SET {set_clauses}, updated_at = NOW()
         WHERE id = :claim_id
-    """)
+    """)  # noqa: S608
     await db.execute(query, {"claim_id": claim_id, **updates})
     await db.flush()
     return await get_claim_by_id(db, claim_id, include_evidence=False)
@@ -490,9 +500,9 @@ async def submit_claim(
         .where(InsuranceClaim.id == claim_id)
         .values(
             status=ClaimStatus.SUBMITTED.value,
-            submitted_at=datetime.now(timezone.utc),
+            submitted_at=datetime.now(UTC),
             auto_evidence_summary=auto_evidence_summary,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
         )
     )
     # Also update bank details on the policy
@@ -504,7 +514,7 @@ async def submit_claim(
             .values(
                 bank_account_number=bank_account_number,
                 bank_ifsc=bank_ifsc,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
     await db.flush()
@@ -522,7 +532,7 @@ async def insurer_review_claim(
     evidence_request_notes: str | None = None,
 ) -> dict[str, Any] | None:
     """Insurer reviews a claim (approve/reject/request_evidence)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     new_status = {
         "approve": ClaimStatus.APPROVED,
         "reject": ClaimStatus.REJECTED,
@@ -562,7 +572,7 @@ async def withdraw_claim(
         .where(InsuranceClaim.id == claim_id)
         .values(
             status=ClaimStatus.WITHDRAWN.value,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
         )
     )
     await db.flush()
@@ -634,7 +644,8 @@ async def get_farmer_insurance_stats(
             COUNT(*) FILTER (WHERE status = 'active') as active_policies,
             COUNT(*) FILTER (WHERE status = 'expired') as expired_policies,
             COALESCE(SUM(sum_insured), 0) as total_sum_insured,
-            COALESCE(SUM(CASE WHEN premium_paid THEN premium_amount ELSE 0 END), 0) as total_premium_paid
+            COALESCE(SUM(CASE WHEN premium_paid THEN premium_amount ELSE 0 END), 0)
+                as total_premium_paid
         FROM insurance.insurance_policies
         WHERE farmer_id = :farmer_id
     """)
@@ -644,7 +655,9 @@ async def get_farmer_insurance_stats(
     claim_query = text("""
         SELECT
             COUNT(*) as total_claims,
-            COUNT(*) FILTER (WHERE status IN ('draft', 'submitted', 'under_review', 'evidence_requested')) as pending_claims,
+            COUNT(*) FILTER (
+                WHERE status IN ('draft', 'submitted', 'under_review', 'evidence_requested')
+            ) as pending_claims,
             COUNT(*) FILTER (WHERE status IN ('approved', 'payout_disbursed')) as approved_claims,
             COALESCE(SUM(claimed_amount), 0) as total_claimed_amount,
             COALESCE(SUM(COALESCE(approved_amount, 0)), 0) as total_approved_amount

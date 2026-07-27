@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import math
 from decimal import Decimal
-from typing import Any
 
 from krishisetu.core.logging import get_logger
 from krishisetu.integrations.sentinel_hub import NDVIRasterStats, SentinelBandData

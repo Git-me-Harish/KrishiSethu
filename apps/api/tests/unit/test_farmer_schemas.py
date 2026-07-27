@@ -7,20 +7,20 @@ validation.
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any, ClassVar
 
 import pytest
 from pydantic import ValidationError
 
+from krishisetu.domains.farmer.repository import (
+    _wkt_to_geojson,
+    geojson_to_wkt,
+)
 from krishisetu.domains.farmer.schemas import (
+    CropCycleCreate,
     GeoJSONPolygon,
     PlotCreate,
-    CropCycleCreate,
 )
-from krishisetu.domains.farmer.repository import (
-    geojson_to_wkt,
-    _wkt_to_geojson,
-)
-
 
 # ---------------------------------------------------------------------------
 # GeoJSON validation
@@ -92,7 +92,9 @@ class TestGeoJSONPolygonValidation:
         with pytest.raises(ValidationError):
             GeoJSONPolygon(
                 type="Point",  # type: ignore[arg-type]
-                coordinates=[[[72.8, 19.1], [72.81, 19.1], [72.81, 19.11], [72.8, 19.11], [72.8, 19.1]]],
+                coordinates=[
+                    [[72.8, 19.1], [72.81, 19.1], [72.81, 19.11], [72.8, 19.11], [72.8, 19.1]]
+                ],
             )
 
 
@@ -104,7 +106,7 @@ class TestGeoJSONPolygonValidation:
 class TestPlotCreateSchema:
     """Test the PlotCreate Pydantic schema with business rules."""
 
-    VALID_BOUNDARY = {
+    VALID_BOUNDARY: ClassVar[dict[str, Any]] = {
         "type": "Polygon",
         "coordinates": [
             [[72.8, 19.1], [72.81, 19.1], [72.81, 19.11], [72.8, 19.11], [72.8, 19.1]]

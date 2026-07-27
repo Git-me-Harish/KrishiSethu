@@ -26,7 +26,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Query, status
 
-from krishisetu.core.dependencies import CurrentUser, CurrentUserOptional, DBSession, require_permissions
+from krishisetu.core.dependencies import (
+    CurrentUser,
+    CurrentUserOptional,
+    DBSession,
+    require_permissions,
+)
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.identity.permissions import (
     PERM_SCHEME_APPLICATION_REVIEW,

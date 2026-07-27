@@ -23,16 +23,16 @@ Create Date: 2026-07-19
 """
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "0006"
-down_revision: Union[str, None] = "0005"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "0005"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 # Disease data — sourced from ICAR and university extensions
@@ -771,6 +771,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # slugs is built from the static DISEASES list above, not user input
     slugs = ", ".join(f"'{d['slug']}'" for d in DISEASES)
-    op.execute(f"DELETE FROM intelligence.disease_treatments WHERE disease_id IN (SELECT id FROM intelligence.diseases WHERE slug IN ({slugs}))")
-    op.execute(f"DELETE FROM intelligence.diseases WHERE slug IN ({slugs})")
+    op.execute(
+        f"DELETE FROM intelligence.disease_treatments WHERE disease_id IN "  # noqa: S608
+        f"(SELECT id FROM intelligence.diseases WHERE slug IN ({slugs}))"
+    )
+    op.execute(f"DELETE FROM intelligence.diseases WHERE slug IN ({slugs})")  # noqa: S608

@@ -52,7 +52,7 @@ class TestSanitizeFreeText:
         assert cleaned.endswith("\u2026")  # ellipsis
 
     def test_unicode_normalization(self) -> None:
-        # NFC: composed form (é = single codepoint) vs decomposed (e + ´)
+        # NFC: composed form (é = single codepoint) vs decomposed (e + acute accent)
         decomposed = "caf\u0065\u0301"  # e + combining acute
         composed = "café"  # é as single codepoint
         assert sanitize_free_text(decomposed) == composed
@@ -118,7 +118,8 @@ class TestSanitizeFilename:
         assert "*" not in result
 
     def test_preserves_extension(self) -> None:
-        assert sanitize_filename("photo.JPG").endswith(".JPG") or sanitize_filename("photo.JPG").endswith(".jpg")
+        result = sanitize_filename("photo.JPG")
+        assert result.endswith(".JPG") or result.endswith(".jpg")
 
     def test_empty_filename_raises(self) -> None:
         with pytest.raises(InputValidationError):

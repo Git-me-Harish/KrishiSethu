@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import httpx
 
 from krishisetu.core.config import settings
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.voice.schemas import (
-    NLURequest,
     NLUResponse,
     VoiceQueryResponse,
 )
@@ -60,10 +57,10 @@ async def process_voice_query(
             )
         except httpx.ConnectError as e:
             logger.error("voice.ml_service_unavailable", error=str(e))
-            raise RuntimeError("Voice service is unavailable. Please try again later.")
+            raise RuntimeError("Voice service is unavailable. Please try again later.") from e
         except httpx.TimeoutException as e:
             logger.error("voice.ml_service_timeout", error=str(e))
-            raise RuntimeError("Voice service timed out. Please try again.")
+            raise RuntimeError("Voice service timed out. Please try again.") from e
 
     if response.status_code != 200:
         logger.error(

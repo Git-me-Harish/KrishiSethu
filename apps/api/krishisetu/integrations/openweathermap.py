@@ -13,7 +13,7 @@ when IMD is unavailable, and cache aggressively to minimize API calls.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -130,14 +130,14 @@ class OpenWeatherMapClient:
             weather_description=weather.get("description", ""),
             weather_icon=weather.get("icon", ""),
             observed_at=datetime.fromtimestamp(
-                data.get("dt", datetime.now(timezone.utc).timestamp()),
-                tz=timezone.utc,
+                data.get("dt", datetime.now(UTC).timestamp()),
+                tz=UTC,
             ),
             sunrise_at=datetime.fromtimestamp(
-                sys_data.get("sunrise"), tz=timezone.utc
+                sys_data.get("sunrise"), tz=UTC
             ) if sys_data.get("sunrise") else None,
             sunset_at=datetime.fromtimestamp(
-                sys_data.get("sunset"), tz=timezone.utc
+                sys_data.get("sunset"), tz=UTC
             ) if sys_data.get("sunset") else None,
             raw_data={"source": "owm", **data},
         )
@@ -150,7 +150,7 @@ class OpenWeatherMapClient:
         daily: dict[date, list[dict]] = {}
 
         for entry in entries:
-            dt = datetime.fromtimestamp(entry["dt"], tz=timezone.utc)
+            dt = datetime.fromtimestamp(entry["dt"], tz=UTC)
             day = dt.date()
             daily.setdefault(day, []).append(entry)
 
@@ -163,7 +163,9 @@ class OpenWeatherMapClient:
 
             # Pick the most common weather_main for the day
             weather_mains = [e["weather"][0]["main"] for e in day_entries if e.get("weather")]
-            weather_main = max(set(weather_mains), key=weather_mains.count) if weather_mains else "Unknown"
+            weather_main = (
+                max(set(weather_mains), key=weather_mains.count) if weather_mains else "Unknown"
+            )
             weather_desc = next(
                 (e["weather"][0]["description"] for e in day_entries
                  if e.get("weather") and e["weather"][0]["main"] == weather_main),

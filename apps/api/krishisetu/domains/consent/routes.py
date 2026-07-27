@@ -128,4 +128,4 @@ async def get_user_consent_history(
     return [ConsentRecord.model_validate(r) for r in records]
 
 
-__all__ = ["router", "admin_router", "ConsentPurpose"]
+__all__ = ["ConsentPurpose", "admin_router", "router"]

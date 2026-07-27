@@ -20,18 +20,17 @@ Each integration is reported as:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 from krishisetu.core.config import settings
-from krishisetu.core.dependencies import CurrentUser, DBSession, require_role
-from krishisetu.core.logging import get_logger
-from krishisetu.domains.identity.models import UserRole
-from krishisetu.core.redis import check_redis_connection
 from krishisetu.core.database import check_db_connection
+from krishisetu.core.dependencies import CurrentUser, DBSession
+from krishisetu.core.logging import get_logger
+from krishisetu.core.redis import check_redis_connection
+from krishisetu.domains.identity.models import UserRole
 
 logger = get_logger(__name__)
 
@@ -80,7 +79,7 @@ async def check_integrations(
 
         raise AuthorizationError("Admin access required")
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     cfg = settings()
     statuses: list[IntegrationStatus] = []
 
@@ -118,7 +117,11 @@ async def check_integrations(
         status="live" if sh_live else "dev_mode" if cfg.is_development else "not_configured",
         is_configured=sh_configured,
         is_live=sh_live,
-        message="Synthetic NDVI (monthly baselines)" if not sh_live else "Connected to Sentinel Hub Process API",
+        message=(
+            "Synthetic NDVI (monthly baselines)"
+            if not sh_live
+            else "Connected to Sentinel Hub Process API"
+        ),
         checked_at=now,
     ))
 
@@ -162,7 +165,6 @@ async def check_integrations(
     redis_ok = await check_redis_connection()
 
     # Overall status
-    any_live = any(s.is_live for s in statuses)
     any_error = any(s.status == "error" for s in statuses)
     all_dev = all(s.status in ("dev_mode", "not_configured") for s in statuses)
 

@@ -7,15 +7,16 @@ and router configurations.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 
 from krishisetu.api.v1.router import api_router
 from krishisetu.core.config import settings
+from krishisetu.core.csrf import CSRFMiddleware
 from krishisetu.core.exceptions import KrishiSetuError, RateLimitExceededError
 from krishisetu.core.logging import configure_logging, get_logger
 from krishisetu.core.middleware import (
@@ -23,7 +24,6 @@ from krishisetu.core.middleware import (
     LoggingMiddleware,
     RequestIDMiddleware,
 )
-from krishisetu.core.csrf import CSRFMiddleware
 from krishisetu.core.rate_limiter import AuthRateLimitMiddleware
 from krishisetu.core.redis import close_redis
 from krishisetu.core.security_headers import SecurityHeadersMiddleware, csp_report_handler

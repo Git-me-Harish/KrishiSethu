@@ -13,11 +13,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from krishisetu.core.audit_logger import (
     AuditAction,
-    AuditOutcome,
     audit_log,
     audit_log_pii_access,
 )

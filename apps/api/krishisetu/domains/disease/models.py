@@ -23,7 +23,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 from uuid import UUID
 
 from sqlalchemy import (
@@ -37,11 +37,11 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from krishisetu.core.database import Base
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -240,7 +240,7 @@ class DiseaseTreatment(Base):
     """
 
     __tablename__ = "disease_treatments"
-    __table_args__ = {"schema": "intelligence"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "intelligence"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -348,7 +348,7 @@ class DiseaseReport(Base):
     """
 
     __tablename__ = "disease_reports"
-    __table_args__ = {"schema": "intelligence"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "intelligence"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -505,7 +505,7 @@ class DiseasePrediction(Base):
     """
 
     __tablename__ = "disease_predictions"
-    __table_args__ = {"schema": "intelligence"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "intelligence"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -610,7 +610,7 @@ class DiseaseFeedback(Base):
     """
 
     __tablename__ = "disease_feedback"
-    __table_args__ = {"schema": "intelligence"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "intelligence"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

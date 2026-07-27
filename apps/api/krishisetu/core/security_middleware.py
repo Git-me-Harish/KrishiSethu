@@ -59,7 +59,10 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
                 except ValueError:
                     return Response(
                         status_code=400,
-                        content='{"error":{"code":"BAD_REQUEST","message":"Invalid Content-Length"}}',
+                        content=(
+                            '{"error":{"code":"BAD_REQUEST",'
+                            '"message":"Invalid Content-Length"}}'
+                        ),
                         media_type="application/json",
                     )
                 max_bytes = settings().MAX_REQUEST_BODY_BYTES
@@ -147,11 +150,13 @@ class SQLInjectionGuardMiddleware(BaseHTTPMiddleware):
                                 for k, v in body_json.items():
                                     if isinstance(v, str) and detect_sql_injection_attempt(v):
                                         suspicious_params.append(f"body:{k}")
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            # Body isn't valid JSON; the pattern match on raw
+                            # text above is still enough to flag as suspicious.
+                            logger.debug("security.sqli_body_parse_failed", error=str(exc))
                         suspicious = True
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("security.sqli_body_read_failed", error=str(exc))
 
         if suspicious:
             request_id = getattr(request.state, "request_id", "unknown")
@@ -175,9 +180,9 @@ class SQLInjectionGuardMiddleware(BaseHTTPMiddleware):
                     key = "security:sqli:counter"
                     await redis.incr(key)
                     await redis.expire(key, 3600)  # 1-hour window
-            except Exception:
+            except Exception as exc:
                 # Redis is best-effort for security counters
-                pass
+                logger.debug("security.sqli_counter_failed", error=str(exc))
 
         return await call_next(request)
 

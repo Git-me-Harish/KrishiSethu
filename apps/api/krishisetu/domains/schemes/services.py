@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -210,7 +210,8 @@ async def submit_application(
 
     if app_dict["status"] != ApplicationStatus.DRAFT.value:
         raise ValidationError(
-            f"Application is in '{app_dict['status']}' state. Only draft applications can be submitted."
+            f"Application is in '{app_dict['status']}' state. "
+            "Only draft applications can be submitted."
         )
 
     # Merge additional data
@@ -421,9 +422,8 @@ async def _compile_farmer_data(db: AsyncSession, farmer_id: UUID) -> dict[str, A
     - farmer.crop_cycles (has_active_crop_cycle)
     - insurance.policies (bank_account_number)
     """
+    from krishisetu.domains.farmer.repository import check_active_crop_cycle, list_plots_by_farmer
     from krishisetu.domains.identity import repository as identity_repo
-    from krishisetu.domains.farmer.repository import list_plots_by_farmer
-    from krishisetu.domains.farmer.repository import check_active_crop_cycle
 
     user = await identity_repo.get_user_by_id(db, farmer_id)
 
@@ -460,7 +460,6 @@ async def _compile_farmer_data(db: AsyncSession, farmer_id: UUID) -> dict[str, A
         data["irrigation_source"] = list(irrigation_sources) if irrigation_sources else []
 
         # Check for active crop cycle
-        from uuid import UUID as UUIDType
         for p in plots:
             plot_id = p.get("id")
             if plot_id:
@@ -480,6 +479,6 @@ async def _compile_farmer_data(db: AsyncSession, farmer_id: UUID) -> dict[str, A
 
 def _generate_application_number() -> str:
     """Generate unique application number: KS-SCH-YYYYMMDD-8hex"""
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    today = datetime.now(UTC).strftime("%Y%m%d")
     short_uuid = uuid.uuid4().hex[:8]
     return f"KS-SCH-{today}-{short_uuid}"

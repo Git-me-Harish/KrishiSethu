@@ -28,7 +28,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
 # ---------------------------------------------------------------------------
 # GeoJSON types
 # ---------------------------------------------------------------------------
@@ -67,18 +66,22 @@ class GeoJSONPolygon(BaseModel):
             ring_type = "exterior ring" if ring_idx == 0 else f"hole {ring_idx}"
             if len(ring) < 4:
                 raise ValueError(
-                    f"Polygon {ring_type} must have at least 4 positions (3 unique + closing), got {len(ring)}"
+                    f"Polygon {ring_type} must have at least 4 positions "
+                    f"(3 unique + closing), got {len(ring)}"
                 )
 
             # Check ring is closed
             if ring[0] != ring[-1]:
-                raise ValueError(f"Polygon {ring_type} must be closed (first and last position identical)")
+                raise ValueError(
+                    f"Polygon {ring_type} must be closed (first and last position identical)"
+                )
 
             # Validate each position has 2 or 3 coordinates
             for pos_idx, pos in enumerate(ring):
                 if len(pos) < 2 or len(pos) > 3:
                     raise ValueError(
-                        f"Position {pos_idx} in {ring_type} must have 2 or 3 coordinates, got {len(pos)}"
+                        f"Position {pos_idx} in {ring_type} must have 2 or 3 "
+                        f"coordinates, got {len(pos)}"
                     )
                 lon, lat = pos[0], pos[1]
                 if not -180 <= lon <= 180:
@@ -180,7 +183,9 @@ class PlotCreate(BaseModel):
             if not self.lessor_name:
                 raise ValueError("lessor_name is required for leased plots")
             if not self.lease_start_date or not self.lease_end_date:
-                raise ValueError("lease_start_date and lease_end_date are required for leased plots")
+                raise ValueError(
+                    "lease_start_date and lease_end_date are required for leased plots"
+                )
             if self.lease_end_date <= self.lease_start_date:
                 raise ValueError("lease_end_date must be after lease_start_date")
         return self
@@ -365,7 +370,11 @@ class CropCycleResponse(BaseModel):
 class OfficerVerifyPlot(BaseModel):
     """Request body for PATCH /officer/plots/{id}/verify."""
 
-    status: Literal[VerificationStatusEnum.VERIFIED, VerificationStatusEnum.REJECTED, VerificationStatusEnum.RESUBMISSION_REQUESTED]
+    status: Literal[
+        VerificationStatusEnum.VERIFIED,
+        VerificationStatusEnum.REJECTED,
+        VerificationStatusEnum.RESUBMISSION_REQUESTED,
+    ]
     notes: str | None = Field(default=None, max_length=2000)
 
 

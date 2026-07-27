@@ -117,7 +117,9 @@ class RefundRequest(BaseModel):
     """Request to process a refund."""
 
     payment_id: UUID
-    amount: Decimal | None = Field(default=None, gt=0, description="Partial refund amount. If None, full refund.")
+    amount: Decimal | None = Field(
+        default=None, gt=0, description="Partial refund amount. If None, full refund."
+    )
     reason: str = Field(..., min_length=5, max_length=500)
 
 

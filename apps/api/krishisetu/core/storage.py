@@ -28,9 +28,8 @@ All S3 keys follow a structured path convention:
 from __future__ import annotations
 
 import asyncio
-import io
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import boto3
@@ -267,11 +266,13 @@ class StorageClient:
     @staticmethod
     def voice_recording_key(user_id: uuid.UUID, timestamp: datetime | None = None) -> str:
         """Generate S3 key for a voice recording."""
-        ts = timestamp or datetime.now(timezone.utc)
+        ts = timestamp or datetime.now(UTC)
         return f"voice/{user_id}/{ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.wav"
 
     @staticmethod
-    def product_image_key(supplier_id: uuid.UUID, product_id: uuid.UUID, suffix: str = "main.jpg") -> str:
+    def product_image_key(
+        supplier_id: uuid.UUID, product_id: uuid.UUID, suffix: str = "main.jpg"
+    ) -> str:
         """Generate S3 key for a marketplace product image."""
         return f"products/{supplier_id}/{product_id}/{suffix}"
 

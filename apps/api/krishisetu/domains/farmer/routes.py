@@ -40,14 +40,13 @@ from krishisetu.domains.farmer.schemas import (
     PlotStatsResponse,
     PlotUpdate,
 )
-from krishisetu.domains.identity.models import UserRole
 from krishisetu.domains.identity.permissions import (
+    PERM_DISEASE_REPORT_SUBMIT,
     PERM_PLOT_CREATE,
+    PERM_PLOT_READ_DISTRICT,
     PERM_PLOT_READ_OWN,
     PERM_PLOT_UPDATE_OWN,
     PERM_PLOT_VERIFY,
-    PERM_PLOT_READ_DISTRICT,
-    PERM_DISEASE_REPORT_SUBMIT,
 )
 
 logger = get_logger(__name__)
@@ -271,8 +270,16 @@ crops_router = APIRouter(prefix="/crops", tags=["crops"])
 @crops_router.get("", response_model=CropListResponse)
 async def list_crops(
     db: DBSession,
-    category: str | None = Query(default=None, description="Filter by category: cereals, pulses, oilseeds, fibre, sugar, plantation, horticulture, spices, fodder"),
-    season: str | None = Query(default=None, description="Filter by primary season: kharif, rabi, zaid"),
+    category: str | None = Query(
+        default=None,
+        description=(
+            "Filter by category: cereals, pulses, oilseeds, fibre, sugar, "
+            "plantation, horticulture, spices, fodder"
+        ),
+    ),
+    season: str | None = Query(
+        default=None, description="Filter by primary season: kharif, rabi, zaid"
+    ),
 ) -> CropListResponse:
     """List all available crops (master data).
 

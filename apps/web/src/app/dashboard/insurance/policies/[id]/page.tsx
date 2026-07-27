@@ -172,7 +172,7 @@ export default function PolicyDetailPage() {
                       {policy.product?.crop_name || "Insurance Policy"}
                     </CardTitle>
                     <CardDescription>
-                      {policy.product?.season?.charAt(0).toUpperCase() + policy.product?.season?.slice(1)} {policy.product?.season_year} · {policy.product?.state}
+                      {policy.product ? policy.product.season.charAt(0).toUpperCase() + policy.product.season.slice(1) : ""} {policy.product?.season_year} · {policy.product?.state}
                     </CardDescription>
                   </div>
                   <span className={`rounded-full px-3 py-1 text-sm font-medium ${badge.color}`}>

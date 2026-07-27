@@ -12,7 +12,7 @@ Requires a Postgres test DB. If unavailable, tests are skipped.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -26,7 +26,6 @@ from krishisetu.domains.privacy.services import (
     create_dsr,
     create_grievance,
     list_my_dsrs,
-    list_my_grievances,
     update_dsr,
     update_grievance,
 )

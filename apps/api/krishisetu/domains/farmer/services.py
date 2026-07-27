@@ -23,7 +23,6 @@ ISRIC SoilGrids integration:
 
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -38,23 +37,22 @@ from krishisetu.core.exceptions import (
 )
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.farmer import repository as repo
-from krishisetu.domains.farmer.officer_scope import (
-    require_within_jurisdiction,
-    resolve_officer_jurisdiction,
-)
 from krishisetu.domains.farmer.models import (
-    CropCycleStatus,
     CropSeason,
     IrrigationSource,
     PlotOwnershipType,
     PlotVerificationStatus,
 )
+from krishisetu.domains.farmer.officer_scope import (
+    require_within_jurisdiction,
+    resolve_officer_jurisdiction,
+)
 from krishisetu.domains.farmer.schemas import (
     CropCycleCreate,
     CropCycleResponse,
     CropCycleUpdate,
-    CropResponse,
     CropListResponse,
+    CropResponse,
     PlotBoundaryUpdate,
     PlotCreate,
     PlotListItem,
@@ -119,7 +117,7 @@ async def create_plot(
     5. Auto-populate soil data from ISRIC (best-effort, async)
     """
     # --- Check plot limit ---
-    existing_plots, total_count = await repo.list_plots_by_farmer(
+    _existing_plots, total_count = await repo.list_plots_by_farmer(
         db, farmer_id, page=1, page_size=1
     )
     if total_count >= MAX_PLOTS_PER_FARMER:

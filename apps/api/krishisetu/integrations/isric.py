@@ -34,7 +34,6 @@ The UI clearly distinguishes ISRIC-sourced data from lab test results.
 
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
 from typing import Any
 

@@ -32,7 +32,6 @@ Circuit breaker:
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -125,7 +124,11 @@ class ExternalAPIRateLimiter:
                 elapsed = now - int(opened_at)
                 if elapsed >= config.circuit_recovery_seconds:
                     # Half-open: allow one test call
-                    await redis.set(circuit_key, CircuitState.HALF_OPEN.value, ex=config.circuit_recovery_seconds)
+                    await redis.set(
+                        circuit_key,
+                        CircuitState.HALF_OPEN.value,
+                        ex=config.circuit_recovery_seconds,
+                    )
                     logger.info("ext_api.circuit_half_open", service=service)
                     # Continue to rate limit check
                 else:
@@ -143,7 +146,10 @@ class ExternalAPIRateLimiter:
                 max=config.max_requests,
                 window=config.window_seconds,
             )
-            return False, f"rate_limited ({current}/{config.max_requests} per {config.window_seconds}s)"
+            return (
+                False,
+                f"rate_limited ({current}/{config.max_requests} per {config.window_seconds}s)",
+            )
 
         # Increment counter
         pipe = redis.pipeline()
@@ -189,8 +195,14 @@ class ExternalAPIRateLimiter:
         if failure_count >= config.circuit_failure_threshold:
             # Open circuit
             now = int(time.time())
-            await redis.set(circuit_key, CircuitState.OPEN.value, ex=config.circuit_recovery_seconds)
-            await redis.set(f"ext:circuit:{service}:opened_at", str(now), ex=config.circuit_recovery_seconds)
+            await redis.set(
+                circuit_key, CircuitState.OPEN.value, ex=config.circuit_recovery_seconds
+            )
+            await redis.set(
+                f"ext:circuit:{service}:opened_at",
+                str(now),
+                ex=config.circuit_recovery_seconds,
+            )
             logger.warning(
                 "ext_api.circuit_opened",
                 service=service,

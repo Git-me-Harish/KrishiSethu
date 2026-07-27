@@ -30,7 +30,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Path, Query, status
 
 from krishisetu.core.dependencies import CurrentUser, DBSession, require_permissions
-from krishisetu.core.exceptions import ValidationError
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.identity.models import UserRole
 from krishisetu.domains.identity.permissions import (

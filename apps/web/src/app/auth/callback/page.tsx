@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { Suspense, useEffect, useState, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2, ShieldCheck, XCircle } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
@@ -55,6 +55,34 @@ function normalizeErrorCode(raw: string | null): KnownErrorCode {
  * 4. Redirects to /dashboard
  */
 export default function AuthCallbackPage() {
+  return (
+    <Suspense fallback={<AuthCallbackFallback />}>
+      <AuthCallbackInner />
+    </Suspense>
+  );
+}
+
+/**
+ * useSearchParams() opts the page out of static prerendering unless it is
+ * wrapped in a Suspense boundary — this is that boundary. The fallback only
+ * renders for the instant before the search params are available on the
+ * client; it carries no auth logic of its own.
+ */
+function AuthCallbackFallback() {
+  return (
+    <div className="flex min-h-screen flex-col items-center justify-center bg-slate-50 px-4">
+      <div className="flex flex-col items-center gap-4 text-center">
+        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-primary/10">
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        </div>
+        <h1 className="text-xl font-semibold text-slate-800">Signing you in with Google…</h1>
+        <p className="text-sm text-slate-500">Just a moment</p>
+      </div>
+    </div>
+  );
+}
+
+function AuthCallbackInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const setSession = useAuthStore((s) => s.setSession);

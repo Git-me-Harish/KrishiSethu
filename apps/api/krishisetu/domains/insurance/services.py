@@ -19,7 +19,7 @@ This eliminates the bureaucratic burden of manual evidence collection.
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -35,11 +35,11 @@ from krishisetu.core.logging import get_logger
 from krishisetu.core.storage import get_storage
 from krishisetu.domains.disease import repository as disease_repo
 from krishisetu.domains.farmer import repository as farmer_repo
+from krishisetu.domains.identity.models import User
 from krishisetu.domains.insurance import repository as repo
 from krishisetu.domains.insurance.insurer_scope import resolve_insurer_name
 from krishisetu.domains.insurance.models import (
     ClaimStatus,
-    ClaimType,
     PolicyStatus,
 )
 from krishisetu.domains.insurance.schemas import (
@@ -58,7 +58,6 @@ from krishisetu.domains.insurance.schemas import (
     PolicyPremiumPaymentRequest,
     PolicyResponse,
 )
-from krishisetu.domains.identity.models import User
 from krishisetu.domains.ndvi import repository as ndvi_repo
 from krishisetu.domains.soil_weather import repository as weather_repo
 
@@ -130,8 +129,8 @@ async def estimate_premium(
 ) -> InsuranceProductPremiumEstimate:
     """Estimate premium for a plot+product combination.
 
-    Sum insured = sum_insured_per_ha × plot_area_ha
-    Premium = sum_insured × farmer_premium_rate
+    Sum insured = sum_insured_per_ha x plot_area_ha
+    Premium = sum_insured x farmer_premium_rate
     """
     product = await repo.get_product_by_id(db, product_id)
     if not product:
@@ -293,7 +292,7 @@ async def pay_premium(
             "payment via /payments before activating the policy."
         )
 
-    policy = await repo.update_policy_premium_payment(
+    await repo.update_policy_premium_payment(
         db, policy_id, payment.payment_number
     )
 
@@ -377,7 +376,6 @@ async def create_claim(
         )
 
     # Check coverage period
-    today = date.today()
     if payload.loss_date < policy_dict["coverage_start_date"]:
         raise ValidationError(
             f"Loss date is before policy coverage start ({policy_dict['coverage_start_date']})"
@@ -421,7 +419,11 @@ async def create_claim(
         claim_id=str(claim.id),
         claim_number=claim_number,
         policy_id=str(payload.policy_id),
-        claim_type=payload.claim_type.value if hasattr(payload.claim_type, 'value') else payload.claim_type,
+        claim_type=(
+            payload.claim_type.value
+            if hasattr(payload.claim_type, "value")
+            else payload.claim_type
+        ),
         claimed_amount=str(claimed_amount),
     )
 
@@ -622,9 +624,9 @@ async def _auto_attach_evidence(
 
     # Define the evidence window (30 days before loss_date to loss_date)
     evidence_start = datetime.combine(
-        loss_date - timedelta(days=30), datetime.min.time(), tzinfo=timezone.utc
+        loss_date - timedelta(days=30), datetime.min.time(), tzinfo=UTC
     )
-    evidence_end = datetime.combine(loss_date, datetime.max.time(), tzinfo=timezone.utc)
+    evidence_end = datetime.combine(loss_date, datetime.max.time(), tzinfo=UTC)
 
     evidence_count = 0
 
@@ -727,7 +729,9 @@ async def _auto_attach_evidence(
                         "title": alert.title,
                         "description": alert.description,
                         "recommended_actions": alert.recommended_actions,
-                        "effective_at": alert.effective_at.isoformat() if alert.effective_at else None,
+                        "effective_at": (
+                            alert.effective_at.isoformat() if alert.effective_at else None
+                        ),
                         "expires_at": alert.expires_at.isoformat() if alert.expires_at else None,
                     },
                     is_auto_attached=True,
@@ -865,7 +869,7 @@ def _generate_policy_number() -> str:
     Format: KS-POL-{YYYYMMDD}-{8-char-uuid}
     Example: KS-POL-20260719-a1b2c3d4
     """
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    today = datetime.now(UTC).strftime("%Y%m%d")
     short_uuid = uuid.uuid4().hex[:8]
     return f"KS-POL-{today}-{short_uuid}"
 
@@ -875,7 +879,7 @@ def _generate_claim_number() -> str:
 
     Format: KS-CLM-{YYYYMMDD}-{8-char-uuid}
     """
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    today = datetime.now(UTC).strftime("%Y%m%d")
     short_uuid = uuid.uuid4().hex[:8]
     return f"KS-CLM-{today}-{short_uuid}"
 
@@ -930,8 +934,12 @@ def _to_claim_response(claim_dict: dict[str, Any]) -> ClaimResponse:
         if e.file_url:
             try:
                 file_url = storage.generate_download_url(e.file_url)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "insurance.claim_evidence.url_generation_failed",
+                    evidence_id=str(e.id),
+                    error=str(exc),
+                )
 
         evidence_resps.append(
             ClaimEvidenceResponse(

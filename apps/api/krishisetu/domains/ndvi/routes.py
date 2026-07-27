@@ -18,13 +18,13 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path, Query, status
+from fastapi import APIRouter, Depends, Path, Query
 
 from krishisetu.core.dependencies import CurrentUser, DBSession, require_permissions
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.identity.permissions import (
-    PERM_NDVI_READ_OWN,
     PERM_NDVI_READ_DISTRICT,
+    PERM_NDVI_READ_OWN,
     PERM_NDVI_REFRESH,
 )
 from krishisetu.domains.ndvi import services

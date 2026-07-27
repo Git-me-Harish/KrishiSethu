@@ -25,18 +25,17 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
-    Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from krishisetu.core.database import Base
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -100,7 +99,8 @@ class SchemeCatalog(Base):
         "conditions": [
             {"field": "total_land_holding_ha", "op": "gt", "value": 0},
             {"field": "state", "op": "in", "value": ["Maharashtra", "Punjab"]},
-            {"field": "occupation_category", "op": "not_in", "value": ["institutional", "government_job"]}
+            {"field": "occupation_category", "op": "not_in",
+             "value": ["institutional", "government_job"]}
         ]
     }
 
@@ -218,7 +218,7 @@ class SchemeCatalog(Base):
     )
 
     # Relationships
-    applications: Mapped[list["SchemeApplication"]] = relationship(
+    applications: Mapped[list[SchemeApplication]] = relationship(
         "SchemeApplication", back_populates="scheme"
     )
 

@@ -10,7 +10,7 @@ Orchestrates:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -21,7 +21,6 @@ from krishisetu.core.exceptions import NotFoundError, ValidationError
 from krishisetu.core.logging import get_logger
 from krishisetu.core.storage import get_storage
 from krishisetu.domains.farmer import repository as farmer_repo
-from krishisetu.domains.farmer.models import Plot
 from krishisetu.domains.ndvi import repository as repo
 from krishisetu.domains.ndvi.computation import (
     classify_ndvi_health,
@@ -377,7 +376,7 @@ async def refresh_plot_ndvi(
     # Check if a refresh was done today (rate limit)
     latest = await repo.get_latest_observation(db, plot_id)
     if latest:
-        age = datetime.now(timezone.utc) - latest.observed_at
+        age = datetime.now(UTC) - latest.observed_at
         if age < timedelta(hours=12):
             return NDVIRefreshResponse(
                 plot_id=plot_id,
@@ -448,6 +447,7 @@ async def acknowledge_anomaly(
 ) -> NDVIAnomalyAlertResponse:
     """Acknowledge or resolve an NDVI anomaly alert."""
     from sqlalchemy import select
+
     from krishisetu.domains.ndvi.models import NDVIAnomalyAlert
 
     # Fetch the alert
@@ -509,7 +509,7 @@ async def get_district_heatmap(
         ],
         total_plots=total_plots,
         avg_ndvi=Decimal(str(round(overall_avg, 4))) if overall_avg else None,
-        generated_at=datetime.now(timezone.utc),
+        generated_at=datetime.now(UTC),
     )
 
 
@@ -631,8 +631,12 @@ def _to_observation_response(
     if obs.raster_url:
         try:
             raster_url = storage.generate_download_url(obs.raster_url)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "ndvi.raster_url_generation_failed",
+                observation_id=str(obs.id),
+                error=str(exc),
+            )
 
     return NDVIObservationResponse(
         id=obs.id,

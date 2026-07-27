@@ -27,10 +27,8 @@ from krishisetu.domains.disease.models import (
     DiseasePrediction,
     DiseaseReport,
     DiseaseReportStatus,
-    DiseaseTreatment,
     FeedbackType,
 )
-
 
 # ---------------------------------------------------------------------------
 # Disease catalog queries
@@ -221,13 +219,15 @@ async def list_reports_for_officer_review(
         params["district"] = district
         params["state"] = state
 
+    # district_clause is a fixed "AND col = :param" fragment; values are
+    # always bound via params, never interpolated directly into the SQL text.
     count_query = text(f"""
         SELECT COUNT(*)
         FROM intelligence.disease_reports r
         LEFT JOIN farmer.plots pl ON pl.id = r.plot_id
         WHERE r.status = 'officer_review'
         {district_clause}
-    """)
+    """)  # noqa: S608
     count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
     total = (await db.execute(count_query, count_params)).scalar_one()
 
@@ -245,7 +245,7 @@ async def list_reports_for_officer_review(
         {district_clause}
         ORDER BY r.created_at ASC
         LIMIT :limit OFFSET :offset
-    """)
+    """)  # noqa: S608 -- district_clause is a fixed fragment; values are bound via params
     result = await db.execute(query, params)
     reports = [_row_to_officer_list_item_dict(row) for row in result.fetchall()]
     return reports, total

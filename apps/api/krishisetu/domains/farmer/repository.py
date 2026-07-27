@@ -21,13 +21,12 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, delete, func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.domains.farmer.models import (
     Crop,
     CropCycle,
-    CropCycleStatus,
     CropSeason,
     IrrigationSource,
     Plot,
@@ -35,7 +34,6 @@ from krishisetu.domains.farmer.models import (
     PlotOwnershipType,
     PlotVerificationStatus,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers: GeoJSON <-> WKT conversion
@@ -452,7 +450,7 @@ async def list_plots_by_district(
         WHERE {' AND '.join(filters)}
         ORDER BY p.created_at DESC
         LIMIT :limit OFFSET :offset
-    """)
+    """)  # noqa: S608 -- filters are fixed fragments; values are bound via params
     result = await db.execute(query, params)
     rows = result.fetchall()
     plots = [_row_to_list_item_dict(row) for row in rows]
@@ -474,13 +472,15 @@ async def update_plot(
     if not updates:
         return await get_plot_by_id(db, plot_id, include_boundary=False)
 
+    # set_clauses only ever uses keys from `allowed` above; values are bound
+    # via params, so no user-controlled string reaches the SQL text.
     set_clauses = ", ".join(f"{k} = :{k}" for k in updates)
     params = {"plot_id": plot_id, **updates}
     query = text(f"""
         UPDATE farmer.plots
         SET {set_clauses}, updated_at = NOW()
         WHERE id = :plot_id
-    """)
+    """)  # noqa: S608
     await db.execute(query, params)
     await db.flush()
     return await get_plot_by_id(db, plot_id)
@@ -808,12 +808,14 @@ async def update_crop_cycle(
     if "status" in updates and hasattr(updates["status"], "value"):
         updates["status"] = updates["status"].value
 
+    # set_clauses only ever uses keys from `allowed` above; values are bound
+    # via params, so no user-controlled string reaches the SQL text.
     set_clauses = ", ".join(f"{k} = :{k}" for k in updates)
     query = text(f"""
         UPDATE farmer.crop_cycles
         SET {set_clauses}, updated_at = NOW()
         WHERE id = :cycle_id
-    """)
+    """)  # noqa: S608
     await db.execute(query, {"cycle_id": cycle_id, **updates})
     await db.flush()
     return await get_crop_cycle_by_id(db, cycle_id)

@@ -5,12 +5,10 @@ Tests pure functions that don't require a database.
 
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
-
 
 # ---------------------------------------------------------------------------
 # Schema tests
@@ -21,8 +19,9 @@ class TestPolicyCreateSchema:
     """Test the PolicyCreateRequest schema."""
 
     def test_valid_minimal_policy(self):
-        from krishisetu.domains.insurance.schemas import PolicyCreateRequest
         from uuid import uuid4
+
+        from krishisetu.domains.insurance.schemas import PolicyCreateRequest
 
         policy = PolicyCreateRequest(
             product_id=uuid4(),
@@ -32,8 +31,9 @@ class TestPolicyCreateSchema:
         assert policy.bank_ifsc is None
 
     def test_valid_with_bank_details(self):
-        from krishisetu.domains.insurance.schemas import PolicyCreateRequest
         from uuid import uuid4
+
+        from krishisetu.domains.insurance.schemas import PolicyCreateRequest
 
         policy = PolicyCreateRequest(
             product_id=uuid4(),
@@ -45,8 +45,9 @@ class TestPolicyCreateSchema:
 
     def test_bank_account_without_ifsc_rejected(self):
         """Bank account and IFSC must be provided together."""
-        from krishisetu.domains.insurance.schemas import PolicyCreateRequest
         from uuid import uuid4
+
+        from krishisetu.domains.insurance.schemas import PolicyCreateRequest
 
         with pytest.raises(ValidationError, match="together"):
             PolicyCreateRequest(
@@ -57,8 +58,9 @@ class TestPolicyCreateSchema:
             )
 
     def test_ifsc_without_account_rejected(self):
-        from krishisetu.domains.insurance.schemas import PolicyCreateRequest
         from uuid import uuid4
+
+        from krishisetu.domains.insurance.schemas import PolicyCreateRequest
 
         with pytest.raises(ValidationError, match="together"):
             PolicyCreateRequest(
@@ -73,22 +75,27 @@ class TestClaimCreateSchema:
     """Test the ClaimCreateRequest schema."""
 
     def test_valid_claim(self):
-        from krishisetu.domains.insurance.schemas import ClaimCreateRequest
         from uuid import uuid4
+
+        from krishisetu.domains.insurance.schemas import ClaimCreateRequest
 
         claim = ClaimCreateRequest(
             policy_id=uuid4(),
             claim_type="localized_risk",
             loss_date="2026-07-15",
-            loss_description="Heavy rainfall caused waterlogging in my rice field, resulting in approximately 40% crop loss.",
+            loss_description=(
+                "Heavy rainfall caused waterlogging in my rice field, "
+                "resulting in approximately 40% crop loss."
+            ),
             estimated_loss_pct=Decimal("40"),
         )
         assert claim.estimated_loss_pct == Decimal("40")
 
     def test_short_description_rejected(self):
         """Loss description must be at least 20 characters."""
-        from krishisetu.domains.insurance.schemas import ClaimCreateRequest
         from uuid import uuid4
+
+        from krishisetu.domains.insurance.schemas import ClaimCreateRequest
 
         with pytest.raises(ValidationError):
             ClaimCreateRequest(
@@ -100,8 +107,9 @@ class TestClaimCreateSchema:
             )
 
     def test_loss_pct_out_of_range_rejected(self):
-        from krishisetu.domains.insurance.schemas import ClaimCreateRequest
         from uuid import uuid4
+
+        from krishisetu.domains.insurance.schemas import ClaimCreateRequest
 
         with pytest.raises(ValidationError):
             ClaimCreateRequest(
@@ -113,8 +121,9 @@ class TestClaimCreateSchema:
             )
 
     def test_invalid_claim_type_rejected(self):
-        from krishisetu.domains.insurance.schemas import ClaimCreateRequest
         from uuid import uuid4
+
+        from krishisetu.domains.insurance.schemas import ClaimCreateRequest
 
         with pytest.raises(ValidationError):
             ClaimCreateRequest(

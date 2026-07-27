@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import secrets
 from dataclasses import dataclass
 from decimal import Decimal
@@ -213,7 +212,7 @@ class RazorpayClient:
                 )
         except httpx.HTTPError as e:
             logger.error("razorpay.create_order.network_error", error=str(e))
-            raise RuntimeError(f"Razorpay API unavailable: {e}")
+            raise RuntimeError(f"Razorpay API unavailable: {e}") from e
 
         if response.status_code != 200:
             error_data = response.json()
@@ -266,7 +265,9 @@ class RazorpayClient:
                     "Refusing to bypass Razorpay signature verification outside "
                     "development."
                 )
-            logger.info("razorpay.signature_verified.dev", order_id=order_id, payment_id=payment_id)
+            logger.info(
+                "razorpay.signature_verified.dev", order_id=order_id, payment_id=payment_id
+            )
             return True
 
         # Live mode: verify HMAC-SHA256 signature
@@ -311,7 +312,7 @@ class RazorpayClient:
                 )
         except httpx.HTTPError as e:
             logger.error("razorpay.fetch_payment.network_error", error=str(e))
-            raise RuntimeError(f"Razorpay API unavailable: {e}")
+            raise RuntimeError(f"Razorpay API unavailable: {e}") from e
 
         if response.status_code != 200:
             raise RuntimeError(f"Razorpay fetch failed: {response.status_code}")
@@ -375,7 +376,7 @@ class RazorpayClient:
                 )
         except httpx.HTTPError as e:
             logger.error("razorpay.refund.network_error", error=str(e))
-            raise RuntimeError(f"Razorpay API unavailable: {e}")
+            raise RuntimeError(f"Razorpay API unavailable: {e}") from e
 
         if response.status_code != 200:
             error_data = response.json()

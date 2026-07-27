@@ -26,7 +26,8 @@ Create Date: 2026-07-19
 """
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
+from datetime import date
 from decimal import Decimal
 
 from alembic import op
@@ -34,9 +35,9 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "0010"
-down_revision: Union[str, None] = "0009"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "0009"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 # PMFBY products for major states and crops
@@ -229,8 +230,10 @@ def upgrade() -> None:
             "farmer_premium_rate": premium_rate,
             "farmer_premium_min": None,
             "farmer_premium_max": None,
-            "coverage_start_date": cov_start,
-            "coverage_end_date": cov_end,
+            # asyncpg (unlike psycopg2) does not auto-cast str -> date for
+            # bound parameters — it needs an actual date object.
+            "coverage_start_date": date.fromisoformat(cov_start),
+            "coverage_end_date": date.fromisoformat(cov_end),
             "claim_cutoff_yield": cutoff_yield,
             "description": description,
             "is_active": True,
@@ -240,5 +243,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # slugs is built from the static PRODUCTS list above, not user input
     slugs = ", ".join(f"'{p[0]}'" for p in PRODUCTS)
-    op.execute(f"DELETE FROM insurance.insurance_products WHERE slug IN ({slugs})")
+    op.execute(f"DELETE FROM insurance.insurance_products WHERE slug IN ({slugs})")  # noqa: S608

@@ -19,9 +19,10 @@ Design notes:
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
+from typing import ClassVar
 from uuid import UUID
 
 from sqlalchemy import (
@@ -36,11 +37,11 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from krishisetu.core.database import Base
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -501,7 +502,7 @@ class WeatherAlert(Base):
     """
 
     __tablename__ = "weather_alerts"
-    __table_args__ = {"schema": "intelligence"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "intelligence"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -573,10 +574,13 @@ class WeatherAlert(Base):
 
     @property
     def is_active(self) -> bool:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc)
-        return self.status == WeatherAlertStatus.ACTIVE and self.effective_at <= now < self.expires_at
+        now = datetime.now(UTC)
+        return (
+            self.status == WeatherAlertStatus.ACTIVE
+            and self.effective_at <= now < self.expires_at
+        )
 
     def __repr__(self) -> str:
         return (

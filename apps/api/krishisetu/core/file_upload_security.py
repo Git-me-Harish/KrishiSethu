@@ -365,12 +365,12 @@ def strip_exif(image_bytes: bytes) -> bytes:
 
 __all__ = [
     "FileValidationError",
-    "UploadContext",
     "SafeUpload",
-    "validate_upload",
-    "validate_file_bytes",
+    "UploadContext",
     "max_size_for",
     "strip_exif",
+    "validate_file_bytes",
+    "validate_upload",
 ]
 
 

@@ -13,15 +13,15 @@ Create Date: 2026-07-19
 """
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 from alembic import op
 import sqlalchemy as sa
 
 revision: str = "0012"
-down_revision: Union[str, None] = "0011"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "0011"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 CATEGORIES = [
@@ -126,5 +126,6 @@ def postgresql_uuid():
 
 
 def downgrade() -> None:
+    # slugs is built from the static CATEGORIES list above, not user input
     slugs = ", ".join(f"'{c['slug']}'" for c in CATEGORIES)
-    op.execute(f"DELETE FROM commerce.product_categories WHERE slug IN ({slugs})")
+    op.execute(f"DELETE FROM commerce.product_categories WHERE slug IN ({slugs})")  # noqa: S608

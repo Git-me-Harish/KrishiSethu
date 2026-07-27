@@ -10,11 +10,8 @@ Tests:
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 import pytest
 from pydantic import ValidationError
-
 
 # ---------------------------------------------------------------------------
 # Schema tests
@@ -38,6 +35,7 @@ class TestDiseaseReportCreateSchema:
 
     def test_report_create_with_plot_and_notes(self):
         from uuid import uuid4
+
         from krishisetu.domains.disease.schemas import DiseaseReportCreate
 
         plot_id = uuid4()
@@ -168,8 +166,8 @@ class TestDiseaseClassifierPreprocessing:
 
     def test_letterbox_resize_preserves_aspect_ratio(self):
         """Letterbox resize should preserve aspect ratio and pad to target size."""
+        from krishisetu_ml.models.disease_classifier import INPUT_SIZE, DiseaseClassifier
         from PIL import Image
-        from krishisetu_ml.models.disease_classifier import DiseaseClassifier, INPUT_SIZE
 
         # Create a classifier-like object just to test the letterbox method
         # (we can't instantiate the real classifier without an ONNX session)
@@ -185,8 +183,8 @@ class TestDiseaseClassifierPreprocessing:
 
     def test_letterbox_resize_centered(self):
         """Letterbox resize should center the image on the canvas."""
+        from krishisetu_ml.models.disease_classifier import INPUT_SIZE, DiseaseClassifier
         from PIL import Image
-        from krishisetu_ml.models.disease_classifier import DiseaseClassifier, INPUT_SIZE
 
         class TestClassifier:
             _letterbox_resize = DiseaseClassifier._letterbox_resize
@@ -206,8 +204,8 @@ class TestDiseaseClassifierPreprocessing:
     def test_preprocess_output_shape(self):
         """Preprocessed image should have shape (1, 3, 640, 640)."""
         import numpy as np
+        from krishisetu_ml.models.disease_classifier import INPUT_SIZE, DiseaseClassifier
         from PIL import Image
-        from krishisetu_ml.models.disease_classifier import DiseaseClassifier, INPUT_SIZE
 
         class TestClassifier:
             preprocess = DiseaseClassifier.preprocess
@@ -224,8 +222,8 @@ class TestDiseaseClassifierPreprocessing:
     def test_preprocess_normalizes_to_imagenet_range(self):
         """Preprocessed values should be roughly in [-2, 2] range after ImageNet normalization."""
         import numpy as np
-        from PIL import Image
         from krishisetu_ml.models.disease_classifier import DiseaseClassifier
+        from PIL import Image
 
         class TestClassifier:
             preprocess = DiseaseClassifier.preprocess
@@ -242,9 +240,8 @@ class TestDiseaseClassifierPreprocessing:
 
     def test_preprocess_converts_grayscale_to_rgb(self):
         """Grayscale images should be converted to RGB."""
-        import numpy as np
-        from PIL import Image
         from krishisetu_ml.models.disease_classifier import DiseaseClassifier
+        from PIL import Image
 
         class TestClassifier:
             preprocess = DiseaseClassifier.preprocess
@@ -275,12 +272,12 @@ class TestDiseaseClassifierPostprocessing:
             def get_inputs(self):
                 class Input:
                     name = "input"
-                    shape = [1, 3, 640, 640]
+                    shape = (1, 3, 640, 640)
                 return [Input()]
 
             def get_outputs(self):
                 class Output:
-                    shape = [1, 5]
+                    shape = (1, 5)
                 return [Output()]
 
         class TestClassifier(DiseaseClassifier):
@@ -309,12 +306,12 @@ class TestDiseaseClassifierPostprocessing:
             def get_inputs(self):
                 class Input:
                     name = "input"
-                    shape = [1, 3, 640, 640]
+                    shape = (1, 3, 640, 640)
                 return [Input()]
 
             def get_outputs(self):
                 class Output:
-                    shape = [1, 3]
+                    shape = (1, 3)
                 return [Output()]
 
         classifier = DiseaseClassifier.__new__(DiseaseClassifier)
@@ -339,12 +336,12 @@ class TestDiseaseClassifierPostprocessing:
             def get_inputs(self):
                 class Input:
                     name = "input"
-                    shape = [1, 3, 640, 640]
+                    shape = (1, 3, 640, 640)
                 return [Input()]
 
             def get_outputs(self):
                 class Output:
-                    shape = [1, 10]
+                    shape = (1, 10)
                 return [Output()]
 
         classifier = DiseaseClassifier.__new__(DiseaseClassifier)
@@ -366,12 +363,12 @@ class TestDiseaseClassifierPostprocessing:
             def get_inputs(self):
                 class Input:
                     name = "input"
-                    shape = [1, 3, 640, 640]
+                    shape = (1, 3, 640, 640)
                 return [Input()]
 
             def get_outputs(self):
                 class Output:
-                    shape = [1, 3]
+                    shape = (1, 3)
                 return [Output()]
 
         classifier = DiseaseClassifier.__new__(DiseaseClassifier)
@@ -399,6 +396,7 @@ class TestStorageKeyGeneration:
 
     def test_disease_report_image_key_format(self):
         from uuid import uuid4
+
         from krishisetu.core.storage import StorageClient
 
         farmer_id = uuid4()
@@ -409,6 +407,7 @@ class TestStorageKeyGeneration:
 
     def test_disease_report_image_key_custom_suffix(self):
         from uuid import uuid4
+
         from krishisetu.core.storage import StorageClient
 
         key = StorageClient.disease_report_image_key(
@@ -418,6 +417,7 @@ class TestStorageKeyGeneration:
 
     def test_ndvi_raster_key_format(self):
         from uuid import uuid4
+
         from krishisetu.core.storage import StorageClient
 
         plot_id = uuid4()

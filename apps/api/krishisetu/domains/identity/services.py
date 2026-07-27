@@ -6,7 +6,7 @@ import base64
 import hashlib
 import hmac
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,8 +27,8 @@ from krishisetu.core.security import (
     generate_otp,
 )
 from krishisetu.core.sms import ConsoleSMSBackend, get_sms_backend
-from krishisetu.domains.identity.models import User, UserRole
 from krishisetu.domains.identity import repository as repo
+from krishisetu.domains.identity.models import User
 from krishisetu.domains.identity.schemas import (
     TokenResponse,
     UserPublic,
@@ -103,7 +103,7 @@ async def send_otp(
 ) -> dict[str, Any]:
     """Generate and dispatch an OTP to the given phone number."""
     redis = await get_redis()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     hour_key = f"otp:rl:{phone}:{purpose}:hour:{now.strftime('%Y%m%d%H')}"
     day_key = f"otp:rl:{phone}:{purpose}:day:{now.strftime('%Y%m%d')}"
@@ -296,7 +296,7 @@ async def _issue_tokens(
     refresh_token, jti = create_refresh_token(user.id)
 
     token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
-    expires_at = datetime.now(timezone.utc) + timedelta(
+    expires_at = datetime.now(UTC) + timedelta(
         days=settings().JWT_REFRESH_TOKEN_EXPIRE_DAYS
     )
 
@@ -320,7 +320,7 @@ async def _issue_tokens(
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
-        token_type="bearer",
+        token_type="bearer",  # noqa: S106 -- OAuth token type, not a credential
         expires_in=settings().JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         user=UserPublic.model_validate(user),
     )

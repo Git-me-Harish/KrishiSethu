@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from krishisetu.core.exceptions import NotFoundError, ValidationError, ConflictError
+from krishisetu.core.exceptions import ConflictError, NotFoundError, ValidationError
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.payment import repository as repo
-from krishisetu.domains.payment.models import PaymentStatus, PaymentType, PaymentProvider
+from krishisetu.domains.payment.models import PaymentStatus, PaymentType
 from krishisetu.domains.payment.schemas import (
     CreatePaymentRequest,
     CreatePaymentResponse,
@@ -456,7 +455,8 @@ async def process_refund(
     refund_amount = payload.amount or payment.refundable_amount
     if refund_amount > payment.refundable_amount:
         raise ValidationError(
-            f"Refund amount ({refund_amount}) exceeds refundable amount ({payment.refundable_amount})"
+            f"Refund amount ({refund_amount}) exceeds refundable amount "
+            f"({payment.refundable_amount})"
         )
 
     # Process refund via Razorpay
@@ -469,7 +469,7 @@ async def process_refund(
                 notes={"reason": payload.reason, "payment_number": payment.payment_number},
             )
         except RuntimeError as e:
-            raise ValidationError(f"Refund processing failed: {e}")
+            raise ValidationError(f"Refund processing failed: {e}") from e
     else:
         # Dev mode: no provider payment ID
         refund = None
@@ -487,6 +487,7 @@ async def process_refund(
         payment_id=str(payment.id),
         refund_amount=str(refund_amount),
         reason=payload.reason,
+        provider_refund_id=refund.refund_id if refund else None,
     )
 
     return PaymentResponse.model_validate(updated)
@@ -700,6 +701,6 @@ async def list_my_payments(
 
 def _generate_payment_number() -> str:
     """Generate unique payment number: KS-PAY-YYYYMMDD-XXXXXXXX"""
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    today = datetime.now(UTC).strftime("%Y%m%d")
     short_uuid = uuid.uuid4().hex[:8]
     return f"KS-PAY-{today}-{short_uuid}"

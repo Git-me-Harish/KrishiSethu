@@ -9,9 +9,8 @@ Endpoints:
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from pydantic import BaseModel, Field
 
-from krishisetu.core.dependencies import CurrentUser, DBSession, require_permissions
+from krishisetu.core.dependencies import CurrentUser, require_permissions
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.identity.permissions import PERM_VOICE_QUERY
 from krishisetu.domains.voice import services
@@ -56,7 +55,10 @@ async def voice_query(
     if file.content_type not in allowed:
         raise HTTPException(
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Unsupported audio format: {file.content_type}. Allowed: {', '.join(sorted(allowed))}",
+            detail=(
+                f"Unsupported audio format: {file.content_type}. "
+                f"Allowed: {', '.join(sorted(allowed))}"
+            ),
         )
 
     audio_bytes = await file.read()
@@ -75,7 +77,7 @@ async def voice_query(
             audio_bytes, file.content_type, language=language
         )
     except RuntimeError as e:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e))
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e)) from e
 
     logger.info(
         "voice.query.completed",
@@ -101,7 +103,7 @@ async def classify_intent(payload: NLURequest) -> NLUResponse:
     try:
         result = await services.classify_text_intent(payload.text, payload.language)
     except RuntimeError as e:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e))
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e)) from e
 
     return result
 

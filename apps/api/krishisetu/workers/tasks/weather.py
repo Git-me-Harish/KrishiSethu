@@ -13,8 +13,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from krishisetu.core.database import AsyncSessionLocal
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.soil_weather import repository as repo
@@ -54,7 +52,7 @@ def sync_all_districts_weather(self) -> dict[str, Any]:
     except Exception as exc:
         logger.error("weather.sync_all.failed", error=str(exc))
         if self.request.retries < self.max_retries:
-            raise self.retry(exc=exc, countdown=300 * (2 ** self.request.retries))
+            raise self.retry(exc=exc, countdown=300 * (2 ** self.request.retries)) from exc
         raise
 
 
@@ -140,7 +138,7 @@ def check_and_dispatch_alerts(self) -> dict[str, Any]:
     except Exception as exc:
         logger.error("weather.alert_check.failed", error=str(exc))
         if self.request.retries < self.max_retries:
-            raise self.retry(exc=exc, countdown=180 * (2 ** self.request.retries))
+            raise self.retry(exc=exc, countdown=180 * (2 ** self.request.retries)) from exc
         raise
 
 

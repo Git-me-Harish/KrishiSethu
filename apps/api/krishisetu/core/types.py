@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from sqlalchemy import TypeDecorator, String
+from sqlalchemy import String, TypeDecorator
 
 
 def make_enum_type(python_enum: type) -> type:
     """Factory that creates a SQLAlchemy TypeDecorator for a Python str+Enum.
-    
+
     Stores the enum value as VARCHAR in the database (no native PG ENUM type
     created), but always returns the Python enum instance on read — ensuring
     ``.value`` and ``isinstance(..., Enum)`` work correctly everywhere.
-    
+
     Usage::
-    
+
         UserRoleType = make_enum_type(UserRole)
         role: Mapped[UserRole] = mapped_column(
             UserRoleType(20), nullable=False, ...,
