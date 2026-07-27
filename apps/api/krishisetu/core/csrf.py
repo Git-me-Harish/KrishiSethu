@@ -230,14 +230,14 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
 
 __all__ = [
-    "CSRFMiddleware",
-    "CSRFError",
     "CSRF_COOKIE",
-    "CSRF_SIGN_COOKIE",
     "CSRF_HEADER",
-    "SAFE_METHODS",
+    "CSRF_SIGN_COOKIE",
     "EXEMPT_PATHS",
+    "SAFE_METHODS",
+    "CSRFError",
+    "CSRFMiddleware",
     "generate_csrf_token",
-    "verify_csrf_token",
     "set_csrf_cookies",
+    "verify_csrf_token",
 ]

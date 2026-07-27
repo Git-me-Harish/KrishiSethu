@@ -75,6 +75,9 @@ async def search_audit_logs(
 
     where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
 
+    # where_clause only concatenates fixed "column = :param" fragments from the
+    # conditions list above; all actual values are bound via params (no
+    # user-controlled string ever reaches the SQL text itself).
     sql = text(f"""
         SELECT id, action, outcome, actor_id, actor_role,
                resource_type, resource_id, details,
@@ -82,9 +85,9 @@ async def search_audit_logs(
         FROM audit.audit_logs{where_clause}
         ORDER BY occurred_at DESC
         LIMIT :limit OFFSET :offset
-    """)
+    """)  # noqa: S608
 
-    count_sql = text(f"SELECT COUNT(*) FROM audit.audit_logs{where_clause}")
+    count_sql = text(f"SELECT COUNT(*) FROM audit.audit_logs{where_clause}")  # noqa: S608
 
     result = await db.execute(sql, params)
     rows = result.mappings().all()
@@ -141,7 +144,7 @@ async def audit_stats(
         WHERE occurred_at >= NOW() - INTERVAL '{safe_hours} hours'
         GROUP BY action, outcome
         ORDER BY event_count DESC
-    """)
+    """)  # noqa: S608
 
     result = await db.execute(sql)
     rows = result.mappings().all()

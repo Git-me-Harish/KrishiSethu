@@ -18,17 +18,18 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from typing import ClassVar
 from uuid import UUID
 
 from sqlalchemy import (
     DateTime,
     ForeignKey,
-    Integer,
     String,
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from krishisetu.core.database import Base
@@ -75,7 +76,7 @@ class DataSubjectRequest(Base):
     """
 
     __tablename__ = "data_subject_requests"
-    __table_args__ = {"schema": "privacy"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "privacy"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -143,7 +144,7 @@ class Grievance(Base):
     """
 
     __tablename__ = "grievances"
-    __table_args__ = {"schema": "privacy"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "privacy"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -201,9 +202,9 @@ class Grievance(Base):
 
 
 __all__ = [
+    "DSRStatus",
+    "DSRType",
     "DataSubjectRequest",
     "Grievance",
-    "DSRType",
-    "DSRStatus",
     "GrievanceStatus",
 ]

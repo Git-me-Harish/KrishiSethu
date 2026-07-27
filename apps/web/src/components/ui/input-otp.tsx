@@ -3,7 +3,10 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-export type InputOTPProps = React.InputHTMLAttributes<HTMLInputElement> & {
+export type InputOTPProps = Omit<
+  React.InputHTMLAttributes<HTMLInputElement>,
+  "onChange" | "value"
+> & {
   length?: number;
   value?: string;
   onChange?: (value: string) => void;

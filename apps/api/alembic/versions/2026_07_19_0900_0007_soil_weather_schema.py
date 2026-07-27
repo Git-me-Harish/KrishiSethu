@@ -19,7 +19,7 @@ Create Date: 2026-07-19
 """
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
@@ -27,9 +27,9 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "0007"
-down_revision: Union[str, None] = "0006"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "0006"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -91,77 +91,65 @@ def upgrade() -> None:
     """)
 
     # --- weather_observations (partitioned by month) ---
-    op.create_table(
-        "weather_observations",
-        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("district", sa.String(100), nullable=False),
-        sa.Column("state", sa.String(100), nullable=False),
-        sa.Column("district_centroid_lon", sa.Numeric(10, 6), nullable=True),
-        sa.Column("district_centroid_lat", sa.Numeric(10, 6), nullable=True),
-        sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("source", sa.String(20), nullable=False),
-        sa.Column("temperature_c", sa.Numeric(5, 2), nullable=True),
-        sa.Column("feels_like_c", sa.Numeric(5, 2), nullable=True),
-        sa.Column("temp_min_c", sa.Numeric(5, 2), nullable=True),
-        sa.Column("temp_max_c", sa.Numeric(5, 2), nullable=True),
-        sa.Column("precipitation_mm", sa.Numeric(6, 2), nullable=True),
-        sa.Column("precipitation_probability", sa.Numeric(5, 2), nullable=True),
-        sa.Column("humidity_pct", sa.Numeric(5, 2), nullable=True),
-        sa.Column("wind_speed_kmph", sa.Numeric(6, 2), nullable=True),
-        sa.Column("wind_direction_deg", sa.Numeric(6, 2), nullable=True),
-        sa.Column("wind_gust_kmph", sa.Numeric(6, 2), nullable=True),
-        sa.Column("pressure_hpa", sa.Numeric(7, 1), nullable=True),
-        sa.Column("cloud_cover_pct", sa.Numeric(5, 2), nullable=True),
-        sa.Column("visibility_km", sa.Numeric(5, 2), nullable=True),
-        sa.Column("uv_index", sa.Numeric(4, 1), nullable=True),
-        sa.Column("weather_main", sa.String(50), nullable=True),
-        sa.Column("weather_description", sa.String(255), nullable=True),
-        sa.Column("weather_icon", sa.String(20), nullable=True),
-        sa.Column("sunrise_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("sunset_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("raw_data", postgresql.JSONB, nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("NOW()"), nullable=False),
-        sa.CheckConstraint(
-            "source IN ('imd', 'owm', 'sentinel')",
-            name="weather_obs_source_check",
-        ),
-        sa.UniqueConstraint("district", "state", "observed_at", "source", name="weather_obs_district_time_source_unique"),
-        sa.PrimaryKeyConstraint("id", "observed_at"),
-        schema="intelligence",
-    )  # Note: partitioned table — no PK index by default
-
-    # Convert to partitioned table
+    # PostgreSQL cannot convert an existing table to a partitioned table via
+    # ALTER TABLE ... PARTITION BY — partitioning must be declared at CREATE
+    # TABLE time. So this is a raw CREATE TABLE instead of op.create_table().
+    # Every UNIQUE/PK constraint on a partitioned table must include the
+    # partition key (observed_at), which is already true here (composite PK
+    # and the unique constraint both include observed_at).
     op.execute("""
-        ALTER TABLE intelligence.weather_observations
-        PARTITION BY RANGE (observed_at);
-    """)
+        CREATE TABLE intelligence.weather_observations (
+            id UUID NOT NULL,
+            district VARCHAR(100) NOT NULL,
+            state VARCHAR(100) NOT NULL,
+            district_centroid_lon NUMERIC(10, 6),
+            district_centroid_lat NUMERIC(10, 6),
+            observed_at TIMESTAMPTZ NOT NULL,
+            source VARCHAR(20) NOT NULL,
+            temperature_c NUMERIC(5, 2),
+            feels_like_c NUMERIC(5, 2),
+            temp_min_c NUMERIC(5, 2),
+            temp_max_c NUMERIC(5, 2),
+            precipitation_mm NUMERIC(6, 2),
+            precipitation_probability NUMERIC(5, 2),
+            humidity_pct NUMERIC(5, 2),
+            wind_speed_kmph NUMERIC(6, 2),
+            wind_direction_deg NUMERIC(6, 2),
+            wind_gust_kmph NUMERIC(6, 2),
+            pressure_hpa NUMERIC(7, 1),
+            cloud_cover_pct NUMERIC(5, 2),
+            visibility_km NUMERIC(5, 2),
+            uv_index NUMERIC(4, 1),
+            weather_main VARCHAR(50),
+            weather_description VARCHAR(255),
+            weather_icon VARCHAR(20),
+            sunrise_at TIMESTAMPTZ,
+            sunset_at TIMESTAMPTZ,
+            raw_data JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT weather_obs_source_check CHECK (source IN ('imd', 'owm', 'sentinel')),
+            CONSTRAINT weather_obs_district_time_source_unique UNIQUE (district, state, observed_at, source),
+            CONSTRAINT weather_observations_pkey PRIMARY KEY (id, observed_at)
+        ) PARTITION BY RANGE (observed_at);
+    """)  # Note: partitioned table — no PK index by default
 
     # Create initial monthly partitions (current month + next 6 months)
-    op.execute("""
-        CREATE TABLE intelligence.weather_observations_2026_07
-        PARTITION OF intelligence.weather_observations
-        FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
-
-        CREATE TABLE intelligence.weather_observations_2026_08
-        PARTITION OF intelligence.weather_observations
-        FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
-
-        CREATE TABLE intelligence.weather_observations_2026_09
-        PARTITION OF intelligence.weather_observations
-        FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
-
-        CREATE TABLE intelligence.weather_observations_2026_10
-        PARTITION OF intelligence.weather_observations
-        FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
-
-        CREATE TABLE intelligence.weather_observations_2026_11
-        PARTITION OF intelligence.weather_observations
-        FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
-
-        CREATE TABLE intelligence.weather_observations_2026_12
-        PARTITION OF intelligence.weather_observations
-        FOR VALUES FROM ('2026-12-01') TO ('2027-01-01');
-    """)
+    # asyncpg cannot run multiple SQL commands in one prepared statement, so
+    # each partition is its own op.execute() call.
+    _weather_obs_months = [
+        ("2026_07", "2026-07-01", "2026-08-01"),
+        ("2026_08", "2026-08-01", "2026-09-01"),
+        ("2026_09", "2026-09-01", "2026-10-01"),
+        ("2026_10", "2026-10-01", "2026-11-01"),
+        ("2026_11", "2026-11-01", "2026-12-01"),
+        ("2026_12", "2026-12-01", "2027-01-01"),
+    ]
+    for suffix, start, end in _weather_obs_months:
+        op.execute(f"""
+            CREATE TABLE intelligence.weather_observations_{suffix}
+            PARTITION OF intelligence.weather_observations
+            FOR VALUES FROM ('{start}') TO ('{end}');
+        """)
 
     # Default partition for out-of-range dates
     op.execute("""

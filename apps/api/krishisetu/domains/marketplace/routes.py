@@ -30,7 +30,6 @@ from fastapi import APIRouter, Depends, Path, Query, status
 from krishisetu.core.dependencies import CurrentUser, DBSession, require_permissions
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.identity.permissions import (
-    PERM_MARKETPLACE_BROWSE,
     PERM_MARKETPLACE_ORDER,
     PERM_MARKETPLACE_READ_OWN_ORDERS,
     PERM_SUPPLIER_CATALOG_MANAGE,

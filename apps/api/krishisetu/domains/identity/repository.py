@@ -13,15 +13,14 @@ the FastAPI dependency `get_db`).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select, update, func
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.core.security import hash_password
 from krishisetu.domains.identity.models import RefreshToken, User, UserRole
-
 
 # ---------------------------------------------------------------------------
 # User queries
@@ -45,6 +44,12 @@ async def get_user_by_phone(db: AsyncSession, phone: str) -> User | None:
 async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
     """Fetch a user by email address."""
     result = await db.execute(select(User).where(User.email == email))
+    return result.scalar_one_or_none()
+
+
+async def get_user_by_google_sub(db: AsyncSession, google_sub: str) -> User | None:
+    """Fetch a user by Google's immutable subject identifier."""
+    result = await db.execute(select(User).where(User.google_sub == google_sub))
     return result.scalar_one_or_none()
 
 
@@ -79,22 +84,47 @@ async def create_user(
     return user
 
 
+# Fields that may be written through update_user. Anything not listed here —
+# notably password_hash, phone, and the login-lockout counters — must be
+# changed through its own dedicated function, so a caller that forwards
+# request data as **kwargs can never mass-assign it.
+_UPDATABLE_USER_FIELDS = frozenset({
+    "full_name",
+    "email",
+    "email_verified",
+    "phone_verified",
+    "preferred_language",
+    "aadhaar_hash",
+    "aadhaar_verified",
+    "google_sub",
+    # Privileged — only reachable from the admin-guarded /admin/users route.
+    "role",
+    "is_active",
+})
+
+
 async def update_user(
     db: AsyncSession,
     user_id: UUID,
     **fields: object,
 ) -> User | None:
-    """Update arbitrary fields on a user.
+    """Update allowlisted fields on a user.
 
-    Only the fields provided in kwargs are updated. Returns the updated user,
-    or None if the user does not exist.
+    Only the fields provided in kwargs are updated, and only if they appear in
+    `_UPDATABLE_USER_FIELDS`. Returns the updated user, or None if the user
+    does not exist.
+
+    Raises ValueError if a caller passes a field that is not updatable — a
+    loud failure is preferable to silently dropping the write.
     """
     if not fields:
         return await get_user_by_id(db, user_id)
 
-    # Don't allow updating id or created_at
-    fields.pop("id", None)
-    fields.pop("created_at", None)
+    rejected = sorted(set(fields) - _UPDATABLE_USER_FIELDS)
+    if rejected:
+        raise ValueError(
+            f"Fields not updatable via update_user: {', '.join(rejected)}"
+        )
 
     await db.execute(
         update(User).where(User.id == user_id).values(**fields)
@@ -108,7 +138,7 @@ async def update_last_login(db: AsyncSession, user_id: UUID) -> None:
     await db.execute(
         update(User)
         .where(User.id == user_id)
-        .values(last_login_at=datetime.now(timezone.utc))
+        .values(last_login_at=datetime.now(UTC))
     )
     await db.flush()
 
@@ -146,7 +176,7 @@ async def lock_account(
         update(User)
         .where(User.id == user_id)
         .values(
-            locked_until=datetime.now(timezone.utc)
+            locked_until=datetime.now(UTC)
             + timedelta(minutes=lock_duration_minutes)
         )
     )
@@ -244,7 +274,7 @@ async def revoke_refresh_token(
     await db.execute(
         update(RefreshToken)
         .where(RefreshToken.jti == jti)
-        .values(revoked_at=datetime.now(timezone.utc), revoked_reason=reason)
+        .values(revoked_at=datetime.now(UTC), revoked_reason=reason)
     )
     await db.flush()
     return True
@@ -272,7 +302,7 @@ async def revoke_all_user_tokens(
             RefreshToken.revoked_at.is_(None),
         )
         .values(
-            revoked_at=datetime.now(timezone.utc),
+            revoked_at=datetime.now(UTC),
             revoked_reason=reason,
         )
         .returning(RefreshToken.id)
@@ -287,7 +317,7 @@ async def cleanup_expired_tokens(db: AsyncSession) -> int:
 
     Called by a periodic Celery task. Returns the number of deleted rows.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    cutoff = datetime.now(UTC) - timedelta(days=30)
     result = await db.execute(
         RefreshToken.__table__.delete().where(RefreshToken.expires_at < cutoff)
     )

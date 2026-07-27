@@ -52,5 +52,5 @@ def refresh_stale_ndvi(self, max_plots: int = 100) -> dict[str, Any]:
     except Exception as exc:
         logger.error("ndvi.refresh_stale.failed", error=str(exc))
         if self.request.retries < self.max_retries:
-            raise self.retry(exc=exc, countdown=600)
+            raise self.retry(exc=exc, countdown=600) from exc
         raise

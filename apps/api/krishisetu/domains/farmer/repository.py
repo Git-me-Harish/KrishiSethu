@@ -21,13 +21,12 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, delete, func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.domains.farmer.models import (
     Crop,
     CropCycle,
-    CropCycleStatus,
     CropSeason,
     IrrigationSource,
     Plot,
@@ -35,7 +34,6 @@ from krishisetu.domains.farmer.models import (
     PlotOwnershipType,
     PlotVerificationStatus,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers: GeoJSON <-> WKT conversion
@@ -380,26 +378,66 @@ async def list_plots_by_farmer(
     return plots, total
 
 
+async def farmer_has_plot_in_district(
+    db: AsyncSession,
+    farmer_id: UUID,
+    district: str,
+    state: str,
+) -> bool:
+    """Whether a farmer holds any plot in the given district.
+
+    Used to scope officer actions on farmer-owned records (scheme
+    applications, disease reports) to the officer's own district.
+    """
+    result = await db.execute(
+        select(func.count(Plot.id)).where(
+            Plot.farmer_id == farmer_id,
+            Plot.district == district,
+            Plot.state == state,
+        )
+    )
+    return result.scalar_one() > 0
+
+
 async def list_plots_by_district(
     db: AsyncSession,
-    district: str,
+    district: str | None,
     state: str | None = None,
     *,
     verification_status: PlotVerificationStatus | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[dict[str, Any]], int]:
-    """List plots in a district (for agri officers)."""
+    """List plots in a district (for agri officers).
+
+    `district`/`state` of None mean unrestricted — only ever passed for admin
+    callers. The same filters are applied to the count and the page so an
+    officer's worklist cannot leak plots outside their district.
+    """
     offset = (page - 1) * page_size
 
-    count_query = select(func.count(Plot.id)).where(Plot.district == district)
+    count_query = select(func.count(Plot.id))
+    if district:
+        count_query = count_query.where(Plot.district == district)
     if state:
         count_query = count_query.where(Plot.state == state)
     if verification_status:
         count_query = count_query.where(Plot.verification_status == verification_status)
     total = (await db.execute(count_query)).scalar_one()
 
-    query = text("""
+    params: dict[str, Any] = {"limit": page_size, "offset": offset}
+    filters = ["1 = 1"]
+    if district:
+        filters.append("p.district = :district")
+        params["district"] = district
+    if state:
+        filters.append("p.state = :state")
+        params["state"] = state
+    if verification_status:
+        filters.append("p.verification_status = :verification_status")
+        params["verification_status"] = verification_status.value
+
+    query = text(f"""
         SELECT p.id, p.survey_number, p.village, p.district, p.state,
                p.area_ha, p.verification_status, p.nickname,
                ST_X(p.centroid::geometry) as centroid_lon,
@@ -409,11 +447,10 @@ async def list_plots_by_district(
                u.phone as farmer_phone
         FROM farmer.plots p
         JOIN identity.users u ON u.id = p.farmer_id
-        WHERE p.district = :district
+        WHERE {' AND '.join(filters)}
         ORDER BY p.created_at DESC
         LIMIT :limit OFFSET :offset
-    """)
-    params: dict[str, Any] = {"district": district, "limit": page_size, "offset": offset}
+    """)  # noqa: S608 -- filters are fixed fragments; values are bound via params
     result = await db.execute(query, params)
     rows = result.fetchall()
     plots = [_row_to_list_item_dict(row) for row in rows]
@@ -435,13 +472,15 @@ async def update_plot(
     if not updates:
         return await get_plot_by_id(db, plot_id, include_boundary=False)
 
+    # set_clauses only ever uses keys from `allowed` above; values are bound
+    # via params, so no user-controlled string reaches the SQL text.
     set_clauses = ", ".join(f"{k} = :{k}" for k in updates)
     params = {"plot_id": plot_id, **updates}
     query = text(f"""
         UPDATE farmer.plots
         SET {set_clauses}, updated_at = NOW()
         WHERE id = :plot_id
-    """)
+    """)  # noqa: S608
     await db.execute(query, params)
     await db.flush()
     return await get_plot_by_id(db, plot_id)
@@ -769,12 +808,14 @@ async def update_crop_cycle(
     if "status" in updates and hasattr(updates["status"], "value"):
         updates["status"] = updates["status"].value
 
+    # set_clauses only ever uses keys from `allowed` above; values are bound
+    # via params, so no user-controlled string reaches the SQL text.
     set_clauses = ", ".join(f"{k} = :{k}" for k in updates)
     query = text(f"""
         UPDATE farmer.crop_cycles
         SET {set_clauses}, updated_at = NOW()
         WHERE id = :cycle_id
-    """)
+    """)  # noqa: S608
     await db.execute(query, {"cycle_id": cycle_id, **updates})
     await db.flush()
     return await get_crop_cycle_by_id(db, cycle_id)

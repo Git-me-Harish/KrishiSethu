@@ -19,7 +19,6 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.domains.consent.models import ConsentPurpose, ConsentStatus

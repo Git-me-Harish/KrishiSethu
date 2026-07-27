@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from typing import ClassVar
 from uuid import UUID
 
 from sqlalchemy import (
@@ -25,12 +26,12 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
-    Integer,
     String,
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from krishisetu.core.database import Base
@@ -159,7 +160,7 @@ class ConsentNotice(Base):
     """
 
     __tablename__ = "consent_notices"
-    __table_args__ = {"schema": "privacy"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "privacy"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

@@ -15,6 +15,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Request
@@ -157,14 +158,24 @@ async def login_with_password(
 # ---------------------------------------------------------------------------
 
 
+# Cookie that binds an in-flight OAuth state to this browser. HttpOnly (no
+# JS needs it) and SameSite=Lax so it survives Google's top-level GET
+# redirect back to the callback.
+OAUTH_STATE_COOKIE = "ks_oauth_state"
+
+
 @router.get("/google", status_code=302)
 async def google_oauth_start() -> RedirectResponse:
     """Start Google OAuth flow by redirecting the user to Google.
 
-    Generates a CSRF state token, stores it in Redis (10-min TTL), then
-    redirects to Google's authorization endpoint.
+    Mints a state token plus a PKCE verifier (stored in Redis, 10-min TTL),
+    sets the state in a signed HttpOnly cookie, then redirects to Google's
+    authorization endpoint.
 
-    The state is verified in /auth/google/callback to prevent CSRF attacks.
+    Both the cookie and the Redis record are checked in /auth/google/callback.
+    The cookie is what makes state a real CSRF defence — without it, `state`
+    only proves some flow was started on this server, not that the browser
+    finishing the flow is the one that began it.
     """
     cfg = settings()
 
@@ -174,7 +185,7 @@ async def google_oauth_start() -> RedirectResponse:
             detail="Google OAuth is not configured on this server.",
         )
 
-    state = await services.generate_google_oauth_state()
+    state, code_challenge = await services.generate_google_oauth_state()
 
     params = urlencode({
         "client_id": cfg.GOOGLE_OAUTH_CLIENT_ID,
@@ -184,10 +195,22 @@ async def google_oauth_start() -> RedirectResponse:
         "access_type": "offline",
         "prompt": "consent",
         "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
     })
 
     auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
-    return RedirectResponse(url=auth_url)
+    response = RedirectResponse(url=auth_url)
+    response.set_cookie(
+        key=OAUTH_STATE_COOKIE,
+        value=services.build_oauth_state_cookie(state),
+        max_age=services.GOOGLE_OAUTH_STATE_TTL_SECONDS,
+        httponly=True,
+        secure=cfg.is_production or cfg.CSRF_COOKIE_SECURE,
+        samesite="lax",
+        path="/api/v1/auth",
+    )
+    return response
 
 
 @router.get("/google/callback")
@@ -200,12 +223,12 @@ async def google_oauth_callback(
     Expects `code` and `state` query params from Google.
 
     Flow:
-    1. Validate state (CSRF protection)
+    1. Validate state against the signed cookie + Redis (CSRF protection)
     2. Exchange code for Google tokens
     3. Fetch user profile from Google
     4. Find or create KrishiSetu user
     5. Issue KrishiSetu JWT tokens
-    6. Redirect to frontend /auth/callback with tokens in URL params
+    6. Redirect to frontend /auth/callback with a single-use exchange code
 
     On error: redirect to frontend login page with error query param.
     """
@@ -218,15 +241,20 @@ async def google_oauth_callback(
     state = request.query_params.get("state")
     error = request.query_params.get("error")
 
+    def _redirect_to_login(error_code: str) -> RedirectResponse:
+        response = RedirectResponse(
+            url=f"{frontend_url}/login?error={error_code}", status_code=302
+        )
+        response.delete_cookie(OAUTH_STATE_COOKIE, path="/api/v1/auth")
+        return response
+
     # Google may return error (e.g. user denied consent)
     if error:
         logger.warning("google_oauth.user_denied", error=error)
-        redirect_url = f"{frontend_url}/login?error=google_denied"
-        return RedirectResponse(url=redirect_url, status_code=302)
+        return _redirect_to_login("google_denied")
 
     if not code or not state:
-        redirect_url = f"{frontend_url}/login?error=google_invalid_callback"
-        return RedirectResponse(url=redirect_url, status_code=302)
+        return _redirect_to_login("google_invalid_callback")
 
     device_info, ip_address = _get_device_info(request)
 
@@ -235,31 +263,50 @@ async def google_oauth_callback(
             db,
             code=code,
             state=state,
+            state_cookie=request.cookies.get(OAUTH_STATE_COOKIE),
             device_info=device_info,
             ip_address=ip_address,
         )
+        exchange_code = await services.store_oauth_exchange_code(token_response)
     except AuthenticationError as exc:
         logger.warning("google_oauth.callback_failed", reason=str(exc))
         # Redirect to frontend with a safe error code (no internal details)
-        redirect_url = f"{frontend_url}/login?error=google_auth_failed"
-        return RedirectResponse(url=redirect_url, status_code=302)
+        return _redirect_to_login("google_auth_failed")
     except Exception as exc:
         logger.error("google_oauth.unexpected_error", error=str(exc))
-        redirect_url = f"{frontend_url}/login?error=google_server_error"
-        return RedirectResponse(url=redirect_url, status_code=302)
+        return _redirect_to_login("google_server_error")
 
-    # Redirect to the frontend callback page with tokens in URL params.
-    # The frontend stores them in localStorage and redirects to /dashboard.
-    # Note: tokens in URL are briefly visible in browser history; this is
-    # acceptable given we already use localStorage (not httpOnly cookies).
-    # For higher security, swap to a short-lived exchange code here.
-    callback_params = urlencode({
-        "access_token": token_response.access_token,
-        "refresh_token": token_response.refresh_token,
-        "expires_in": token_response.expires_in,
-    })
-    redirect_url = f"{frontend_url}/auth/callback?{callback_params}"
-    return RedirectResponse(url=redirect_url, status_code=302)
+    # Redirect with a single-use, 60-second exchange code instead of the
+    # tokens themselves. Query strings leak into browser history, Referer
+    # headers and proxy logs — a 30-day refresh token must never travel there.
+    # The frontend redeems this via POST /auth/google/exchange.
+    callback_params = urlencode({"code": exchange_code})
+    response = RedirectResponse(
+        url=f"{frontend_url}/auth/callback?{callback_params}", status_code=302
+    )
+    response.delete_cookie(OAUTH_STATE_COOKIE, path="/api/v1/auth")
+    return response
+
+
+class GoogleExchangeRequest(BaseModel):
+    """Request body for POST /auth/google/exchange."""
+
+    code: str = Field(
+        ...,
+        min_length=16,
+        max_length=128,
+        description="Single-use code from the /auth/callback redirect",
+    )
+
+
+@router.post("/google/exchange", response_model=TokenResponse, status_code=200)
+async def google_oauth_exchange(payload: GoogleExchangeRequest) -> TokenResponse:
+    """Redeem a single-use OAuth exchange code for the issued token pair.
+
+    The code is deleted atomically on read, so a replay — from history, a log,
+    or a second tab — gets nothing.
+    """
+    return await services.consume_oauth_exchange_code(payload.code)
 
 
 # ---------------------------------------------------------------------------
@@ -357,9 +404,9 @@ async def verify_aadhaar_otp(
     db: DBSession,
 ) -> AadhaarVerificationResponse:
     """Verify Aadhaar OTP and mark the user's Aadhaar as verified."""
-    from krishisetu.integrations.uidai import get_uidai_client
     from krishisetu.core.security import hash_aadhaar
     from krishisetu.domains.identity import repository as repo
+    from krishisetu.integrations.uidai import get_uidai_client
 
     client = get_uidai_client()
     result = await client.verify_otp(
@@ -367,7 +414,9 @@ async def verify_aadhaar_otp(
     )
 
     if result.verified:
-        aadhaar_hash = hash_aadhaar(payload.aadhaar)
+        # PBKDF2 at 310k iterations is ~200ms of CPU — run it off the event
+        # loop so one e-KYC call doesn't stall every other request.
+        aadhaar_hash = await asyncio.to_thread(hash_aadhaar, payload.aadhaar)
         updates: dict[str, object] = {
             "aadhaar_verified": True,
             "aadhaar_hash": aadhaar_hash,
@@ -438,7 +487,15 @@ class UpdateProfileRequest(BaseModel):
     """Schema for PATCH /me."""
 
     full_name: str | None = Field(default=None, min_length=2, max_length=255)
-    email: str | None = Field(default=None, max_length=255)
+    email: str | None = Field(
+        default=None,
+        max_length=255,
+        description=(
+            "Rejected: email changes require a verification flow that does "
+            "not exist yet. Retained so callers get a clear 422 rather than "
+            "a silently ignored field."
+        ),
+    )
     preferred_language: str | None = Field(
         default=None,
         description="One of: en, hi, mr, ta, te, bn, kn, gu, pa, ml",
@@ -458,19 +515,30 @@ async def update_me(
     current_user: CurrentUser,
     db: DBSession,
 ) -> UserPublic:
-    """Update the current user's profile."""
+    """Update the current user's profile.
+
+    Email is deliberately NOT updatable here. This endpoint used to accept an
+    arbitrary address, write it straight to the record, and leave
+    email_verified untouched — so anyone could claim a stranger's Gmail
+    address and, under the old email-matching OAuth login, be handed that
+    stranger's Google sign-in. Changing an email needs a verification round
+    trip; until that exists, the field is refused outright.
+    """
+    from krishisetu.core.exceptions import ValidationError
     from krishisetu.domains.identity import repository as repo
+
+    if payload.email is not None and payload.email != current_user.email:
+        raise ValidationError(
+            "Email address cannot be changed here — it requires verification. "
+            "Contact support to update your email."
+        )
 
     updates: dict[str, object] = {}
     if payload.full_name is not None:
         updates["full_name"] = payload.full_name
-    if payload.email is not None:
-        updates["email"] = payload.email
     if payload.preferred_language is not None:
         allowed = {"en", "hi", "mr", "ta", "te", "bn", "kn", "gu", "pa", "ml"}
         if payload.preferred_language not in allowed:
-            from krishisetu.core.exceptions import ValidationError
-
             raise ValidationError(
                 f"Language must be one of: {', '.join(sorted(allowed))}"
             )

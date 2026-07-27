@@ -163,14 +163,24 @@ def _evaluate_condition(
             if isinstance(expected, list):
                 # Handle list fields (e.g., irrigation_source is a list)
                 if isinstance(actual, list):
-                    return any(a in expected for a in actual), f"{field_name} must be one of: {', '.join(str(v) for v in expected)}"
-                return actual in expected, f"{field_name} must be one of: {', '.join(str(v) for v in expected)}"
+                    values = ", ".join(str(v) for v in expected)
+                    return (
+                        any(a in expected for a in actual),
+                        f"{field_name} must be one of: {values}",
+                    )
+                values = ", ".join(str(v) for v in expected)
+                return actual in expected, f"{field_name} must be one of: {values}"
             return False, f"Invalid 'in' condition for {field_name}"
         elif operator == "not_in":
             if isinstance(expected, list):
                 if isinstance(actual, list):
-                    return not any(a in expected for a in actual), f"{field_name} must not be any of: {', '.join(str(v) for v in expected)}"
-                return actual not in expected, f"{field_name} must not be any of: {', '.join(str(v) for v in expected)}"
+                    values = ", ".join(str(v) for v in expected)
+                    return (
+                        not any(a in expected for a in actual),
+                        f"{field_name} must not be any of: {values}",
+                    )
+                values = ", ".join(str(v) for v in expected)
+                return actual not in expected, f"{field_name} must not be any of: {values}"
             return False, f"Invalid 'not_in' condition for {field_name}"
         else:
             return False, f"Unknown operator: {operator}"

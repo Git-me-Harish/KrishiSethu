@@ -18,7 +18,7 @@ second run will detect the existing prediction and skip inference.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -26,7 +26,7 @@ from uuid import UUID
 import httpx
 from celery import Task
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.core.config import settings
 from krishisetu.core.database import AsyncSessionLocal
@@ -90,7 +90,7 @@ def predict_disease(self: Task, report_id: str) -> dict[str, Any]:
             return {"status": "failed", "error": str(exc)}
 
         # Retry with exponential backoff
-        raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
+        raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +136,11 @@ async def _run_prediction_async(report_id: UUID) -> dict[str, Any]:
             raise ValueError("Image is empty")
 
         # Validate image size
-        max_size = settings().MAX_IMAGE_SIZE_MB * 1024 * 1024 if hasattr(settings(), 'MAX_IMAGE_SIZE_MB') else 10 * 1024 * 1024
+        max_size = (
+            settings().MAX_IMAGE_SIZE_MB * 1024 * 1024
+            if hasattr(settings(), "MAX_IMAGE_SIZE_MB")
+            else 10 * 1024 * 1024
+        )
         if len(image_bytes) > max_size:
             await _mark_report_failed(report_id, f"Image too large: {len(image_bytes)} bytes")
             raise ValueError(f"Image exceeds size limit ({len(image_bytes)} > {max_size})")
@@ -189,7 +193,7 @@ async def _update_report_status(
     await db.execute(
         update(DiseaseReport)
         .where(DiseaseReport.id == report_id)
-        .values(status=status.value, updated_at=datetime.now(timezone.utc))
+        .values(status=status.value, updated_at=datetime.now(UTC))
     )
     await db.flush()
 
@@ -203,7 +207,7 @@ async def _mark_report_failed(report_id: UUID, reason: str) -> None:
             .values(
                 status=DiseaseReportStatus.FAILED.value,
                 failure_reason=reason,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
         await db.commit()
@@ -264,13 +268,20 @@ async def _call_inference_service(image_bytes: bytes) -> dict[str, Any]:
     """
     ml_url = settings().ML_INFERENCE_URL.rstrip("/")
     endpoint = f"{ml_url}/predict/disease"
-    timeout = settings().INFERENCE_TIMEOUT_SECONDS if hasattr(settings(), 'INFERENCE_TIMEOUT_SECONDS') else 30
+    timeout = (
+        settings().INFERENCE_TIMEOUT_SECONDS
+        if hasattr(settings(), "INFERENCE_TIMEOUT_SECONDS")
+        else 30
+    )
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             response = await client.post(
                 endpoint,
                 files={"file": ("image.jpg", image_bytes, "image/jpeg")},
+                headers={
+                    "X-ML-Service-Token": settings().ML_SERVICE_TOKEN.get_secret_value()
+                },
             )
         except httpx.ConnectError as e:
             raise RuntimeError(f"ML service unavailable at {endpoint}: {e}") from e

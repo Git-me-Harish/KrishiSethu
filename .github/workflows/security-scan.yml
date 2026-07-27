@@ -52,14 +52,76 @@ jobs:
       - name: Install security tools
         run: pip install bandit pip-audit safety
 
+      # Bandit must be able to fail the job. The SARIF upload is a separate
+      # `if: always()` step so findings still reach code scanning on failure.
       - name: Bandit (AST security lint)
-        run: bandit -r krishisetu -ll -ii -f sarif -o bandit-results.sarif || true
+        run: bandit -r krishisetu -ll -ii -f sarif -o bandit-results.sarif
 
+      # pip-audit cannot parse a pyproject.toml via --requirement (that flag
+      # expects a requirements.txt). Project mode resolves the dependencies
+      # declared in pyproject.toml instead.
+      #
+      # The --ignore-vuln entries below are narrowly-scoped exceptions, not a
+      # blanket bypass. Each one is unfixable today without a breaking major
+      # version bump that is out of scope for this security PR:
+      #
+      #   - cryptography 44.0.1: PYSEC-2026-2141, PYSEC-2026-35 and
+      #     GHSA-537c-gmf6-5ccf are only fixed in 46.0.5+/48.0.1+. That is a
+      #     jump across multiple cryptography "majors" (44 -> 46/48); pyca
+      #     does not guarantee API stability across those and it touches the
+      #     JWT/bcrypt hashing hot path, so it needs its own PR with focused
+      #     testing. (44.0.0 -> 44.0.1 was a safe patch bump and IS applied.)
+      #   - pillow 11.0.0: all remaining findings (PYSEC-2026-165,
+      #     PYSEC-2026-2249..2257, PYSEC-2026-2874, PYSEC-2026-3451,
+      #     PYSEC-2026-3453..3496) are fixed only in Pillow 12.x, a major
+      #     version bump for an image-processing library used on the
+      #     upload/avatar path. Needs a dedicated PR with image regression
+      #     testing.
+      #   - starlette 0.41.3: all remaining findings (PYSEC-2026-161,
+      #     PYSEC-2026-1941, PYSEC-2026-1942, PYSEC-2026-2280, PYSEC-2026-2281,
+      #     PYSEC-2026-248, PYSEC-2026-249) are fixed only at starlette
+      #     >=0.47.2, but fastapi==0.115.6 pins `starlette<0.42.0`. Fixing
+      #     these requires upgrading fastapi itself (0.115 -> 0.140, dozens of
+      #     minor releases) which is out of scope for a security-only PR.
+      #     Needs its own PR with a full API regression pass.
+      #
+      # (python-multipart, pyjwt, python-dotenv and cryptography's one safe
+      # patch release were upgraded directly instead of ignored - see
+      # pyproject.toml.)
       - name: pip-audit (dependency vulnerabilities)
-        run: pip-audit --strict --requirement pyproject.toml
+        run: |
+          pip-audit --strict \
+            --ignore-vuln GHSA-537c-gmf6-5ccf \
+            --ignore-vuln PYSEC-2026-35 \
+            --ignore-vuln PYSEC-2026-2141 \
+            --ignore-vuln PYSEC-2026-165 \
+            --ignore-vuln PYSEC-2026-2249 \
+            --ignore-vuln PYSEC-2026-2250 \
+            --ignore-vuln PYSEC-2026-2252 \
+            --ignore-vuln PYSEC-2026-2253 \
+            --ignore-vuln PYSEC-2026-2254 \
+            --ignore-vuln PYSEC-2026-2255 \
+            --ignore-vuln PYSEC-2026-2256 \
+            --ignore-vuln PYSEC-2026-2257 \
+            --ignore-vuln PYSEC-2026-2874 \
+            --ignore-vuln PYSEC-2026-3451 \
+            --ignore-vuln PYSEC-2026-3453 \
+            --ignore-vuln PYSEC-2026-3454 \
+            --ignore-vuln PYSEC-2026-3493 \
+            --ignore-vuln PYSEC-2026-3494 \
+            --ignore-vuln PYSEC-2026-3495 \
+            --ignore-vuln PYSEC-2026-3496 \
+            --ignore-vuln PYSEC-2026-161 \
+            --ignore-vuln PYSEC-2026-1941 \
+            --ignore-vuln PYSEC-2026-1942 \
+            --ignore-vuln PYSEC-2026-2280 \
+            --ignore-vuln PYSEC-2026-2281 \
+            --ignore-vuln PYSEC-2026-248 \
+            --ignore-vuln PYSEC-2026-249 \
+            .
 
       - name: Safety (additional CVE check)
-        run: safety check || true
+        run: safety check
 
       - name: Upload Bandit SARIF
         if: always()
@@ -72,7 +134,7 @@ jobs:
   # JavaScript: npm audit
   # ---------------------------------------------------------------------------
   js-security:
-    name: JavaScript (npm audit)
+    name: JavaScript (pnpm audit)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -80,22 +142,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The repo is pnpm-only: apps/web/pnpm-lock.yaml is tracked and there is
+      # no package-lock.json, so the previous `npm ci` job never ran the audit.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda  # v4.1.0
+        with:
+          version: 9
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: apps/web/package-lock.json
+          cache: 'pnpm'
+          cache-dependency-path: apps/web/pnpm-lock.yaml
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
-      - name: npm audit (HIGH and CRITICAL)
-        run: npm audit --omit=dev --audit-level=high
-        continue-on-error: ${{ github.ref == 'refs/heads/develop' }}
+      # Findings are muted via `pnpm.auditConfig.ignoreGhsas` in package.json,
+      # not here, because pnpm audit only reads that config from the
+      # manifest. Every GHSA listed there is unfixable today without a
+      # breaking major bump that is out of scope for this security PR:
+      #   - next@14.2.35 (the latest 14.2.x patch): all remaining `next`
+      #     advisories are only fixed in Next 15.x. A 14 -> 15 major bump is
+      #     explicitly out of scope (see package.json).
+      #   - next-intl@3.26.5 (the latest 3.x patch): both `next-intl`
+      #     advisories are only fixed in next-intl 4.x, which itself requires
+      #     a Next 15 peer. Same story, needs its own PR.
+      #   - postcss's 3 advisories were fixed directly instead of ignored, via
+      #     a `pnpm.overrides` pin to postcss@^8.5.23 (a same-major patch
+      #     bump of a dependency next bundles internally) - see package.json.
+      - name: pnpm audit (HIGH and CRITICAL)
+        run: pnpm audit --prod --audit-level=high
 
       - name: TypeScript typecheck
-        run: npx tsc --noEmit
+        run: pnpm exec tsc --noEmit
 
   # ---------------------------------------------------------------------------
   # OWASP ZAP baseline scan (only on PRs that touch the API)
@@ -110,6 +191,13 @@ jobs:
 
       - name: Start API
         working-directory: apps/api
+        # docker-compose.yml now refuses to start without these (see findings
+        # on hardcoded JWT secret / unauthenticated redis + ml-inference).
+        # Ephemeral CI-only values; nothing here reaches a real environment.
+        env:
+          JWT_SECRET: ci-only-${{ github.run_id }}-${{ github.run_attempt }}-jwt-secret
+          ML_SERVICE_TOKEN: ci-only-${{ github.run_id }}-${{ github.run_attempt }}-ml-token
+          REDIS_PASSWORD: ci-only-${{ github.run_id }}-redis
         run: |
           docker compose -f ../../infra/docker-compose.yml up -d postgres redis minio
           sleep 10
@@ -134,11 +222,16 @@ jobs:
           target: 'http://localhost:8000/api/v1/health'
           cmd_options: '-c infra/security/zap-rules.tsv -I'
           allow_issue_writing: false
-          fail_action: false  # set to true once API passes baseline
+          fail_action: true
 
       - name: Teardown
         if: always()
-        run: docker compose -f infra/docker-compose.yml down -v
+        working-directory: apps/api
+        env:
+          JWT_SECRET: ci-only-${{ github.run_id }}-${{ github.run_attempt }}-jwt-secret
+          ML_SERVICE_TOKEN: ci-only-${{ github.run_id }}-${{ github.run_attempt }}-ml-token
+          REDIS_PASSWORD: ci-only-${{ github.run_id }}-redis
+        run: docker compose -f ../../infra/docker-compose.yml down -v
 
   # ---------------------------------------------------------------------------
   # Trivy Docker image scan (only on main branch + nightly)
@@ -156,7 +249,9 @@ jobs:
         run: docker build -t krishisetu-api:ci .
 
       - name: Trivy scan (HIGH and CRITICAL)
-        uses: aquasecurity/trivy-action@master
+        # Pinned to a commit SHA: @master is a mutable third-party ref and this
+        # job runs with security-events: write.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           image-ref: krishisetu-api:ci
           severity: 'HIGH,CRITICAL'
@@ -195,8 +290,10 @@ jobs:
 
       - name: Ruff
         run: ruff check krishisetu
-        continue-on-error: ${{ github.ref == 'refs/heads/develop' }}
 
+      # NOT yet blocking: mypy runs in strict mode against a codebase that has
+      # never been type-clean, so gating it here would block every PR until a
+      # separate typing cleanup lands. Track that work before flipping this.
       - name: mypy
         run: mypy krishisetu
-        continue-on-error: true  # mypy is strict; don't block yet
+        continue-on-error: true

@@ -22,6 +22,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
+from typing import ClassVar
 from uuid import UUID
 
 from geoalchemy2 import Geography
@@ -41,7 +42,6 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from krishisetu.core.database import Base
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -109,7 +109,7 @@ class Crop(Base):
     """
 
     __tablename__ = "crops"
-    __table_args__ = {"schema": "farmer"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "farmer"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -397,7 +397,7 @@ class PlotBoundary(Base):
     """
 
     __tablename__ = "plot_boundaries"
-    __table_args__ = {"schema": "farmer"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "farmer"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -456,7 +456,7 @@ class CropCycle(Base):
     """
 
     __tablename__ = "crop_cycles"
-    __table_args__ = {"schema": "farmer"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "farmer"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

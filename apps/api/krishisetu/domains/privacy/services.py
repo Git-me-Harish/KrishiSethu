@@ -19,7 +19,7 @@ for tax purposes, anonymized audit logs).
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import Request
@@ -27,12 +27,11 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.core.audit_logger import AuditAction, audit_log
-from krishisetu.core.config import settings
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.privacy.models import (
+    DataSubjectRequest,
     DSRStatus,
     DSRType,
-    DataSubjectRequest,
     Grievance,
     GrievanceStatus,
 )
@@ -59,7 +58,7 @@ def _due_at(request_type: DSRType) -> datetime:
         DSRType.RESTRICTION: SLA_ACCESS,
     }
     days = days_map.get(request_type, SLA_ACCESS)
-    return datetime.now(timezone.utc) + timedelta(days=days)
+    return datetime.now(UTC) + timedelta(days=days)
 
 
 async def create_dsr(
@@ -75,7 +74,7 @@ async def create_dsr(
     The DSR is auto-acknowledged within the same transaction (the system
     satisfies the 24-hour acknowledgement SLA immediately).
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     dsr = DataSubjectRequest(
         user_id=user_id,
         request_type=request_type.value,
@@ -179,7 +178,7 @@ async def update_dsr(
     if officer_id is not None:
         dsr.assigned_to = officer_id
     if status in (DSRStatus.COMPLETED, DSRStatus.REJECTED):
-        dsr.completed_at = datetime.now(timezone.utc)
+        dsr.completed_at = datetime.now(UTC)
 
     await audit_log(
         db,
@@ -310,7 +309,7 @@ async def create_grievance(
     request: Request | None = None,
 ) -> Grievance:
     """File a new DPDP grievance."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # Generate a human-readable grievance number: GRV-YYYYMMDD-XXXXX
     grievance_number = f"GRV-{now.strftime('%Y%m%d')}-{secrets.token_hex(4).upper()}"
 
@@ -412,7 +411,7 @@ async def update_grievance(
     if officer_id is not None:
         grievance.assigned_to = officer_id
     if status == GrievanceStatus.RESOLVED:
-        grievance.resolved_at = datetime.now(timezone.utc)
+        grievance.resolved_at = datetime.now(UTC)
 
     if status == GrievanceStatus.RESOLVED:
         await audit_log(
@@ -430,17 +429,17 @@ async def update_grievance(
 
 
 __all__ = [
-    "create_dsr",
-    "get_dsr",
-    "list_my_dsrs",
-    "list_all_dsrs",
-    "update_dsr",
-    "execute_erasure",
-    "create_grievance",
-    "get_grievance",
-    "list_my_grievances",
-    "list_all_grievances",
-    "update_grievance",
-    "SLA_GRIEVANCE",
     "SLA_ACKNOWLEDGE_HOURS",
+    "SLA_GRIEVANCE",
+    "create_dsr",
+    "create_grievance",
+    "execute_erasure",
+    "get_dsr",
+    "get_grievance",
+    "list_all_dsrs",
+    "list_all_grievances",
+    "list_my_dsrs",
+    "list_my_grievances",
+    "update_dsr",
+    "update_grievance",
 ]

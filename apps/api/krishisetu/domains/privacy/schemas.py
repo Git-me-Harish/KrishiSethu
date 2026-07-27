@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from krishisetu.domains.privacy.models import DSRStatus, DSRType, GrievanceStatus
 
-
 # ---------------------------------------------------------------------------
 # DSR schemas
 # ---------------------------------------------------------------------------
@@ -122,8 +121,8 @@ __all__ = [
     "DSRCreateRequest",
     "DSRResponse",
     "DSRUpdateRequest",
+    "ErasureConfirmRequest",
     "GrievanceCreateRequest",
     "GrievanceResponse",
     "GrievanceUpdateRequest",
-    "ErasureConfirmRequest",
 ]

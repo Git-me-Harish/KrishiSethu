@@ -25,14 +25,24 @@ const GOOGLE_ERROR_MESSAGES: Record<string, string> = {
   google_denied: "You cancelled the Google sign-in. Try again or use phone OTP.",
   google_auth_failed: "Google authentication failed. Please try again.",
   google_server_error: "A server error occurred during Google sign-in. Please try again.",
-  google_missing_tokens: "Incomplete Google sign-in. Please try again.",
+  google_missing_code: "Incomplete Google sign-in. Please try again.",
   google_completion_failed: "Could not complete Google sign-in. Please try again.",
   google_invalid_callback: "Invalid Google callback. Please try again.",
 };
 
+/** Only allow same-origin, path-only redirects — never an attacker's URL. */
+function safeNextPath(raw: string | null): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/dashboard";
+  return raw;
+}
+
 export default function LoginPage() {
   const router = useRouter();
-  const { loginWithOtp, loginWithPassword, isLoading, error, clearError } = useAuthStore();
+  // isSubmitting, not isLoading: isLoading tracks session hydration and is
+  // true on first paint, which rendered every button on this page disabled
+  // behind a spinner before the user could touch anything.
+  const { loginWithOtp, loginWithPassword, isSubmitting, error, clearError } =
+    useAuthStore();
 
   const [authMethod, setAuthMethod] = useState<AuthMethod>("otp");
   const [step, setStep] = useState<Step>("phone");
@@ -44,6 +54,8 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [googleErrorMessage, setGoogleErrorMessage] = useState<string | null>(null);
+  // Where middleware.ts wanted to send them before it bounced them here.
+  const [nextPath, setNextPath] = useState("/dashboard");
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -53,12 +65,13 @@ export default function LoginPage() {
         GOOGLE_ERROR_MESSAGES[errorCode] ?? "Google sign-in failed. Please try again."
       );
     }
+    setNextPath(safeNextPath(params.get("next")));
   }, []);
 
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   useEffect(() => {
-    if (isAuthenticated) router.push("/dashboard");
-  }, [isAuthenticated, router]);
+    if (isAuthenticated) router.push(nextPath);
+  }, [isAuthenticated, nextPath, router]);
 
   useEffect(() => {
     if (resendCooldown <= 0) return;
@@ -94,7 +107,7 @@ export default function LoginPage() {
     clearError();
     try {
       await loginWithOtp(phone, code);
-      router.push("/dashboard");
+      router.push(nextPath);
     } catch {
       // error surfaced from store
     }
@@ -120,7 +133,7 @@ export default function LoginPage() {
     }
     try {
       await loginWithPassword(email, password);
-      router.push("/dashboard");
+      router.push(nextPath);
     } catch {
       // error surfaced from store
     }
@@ -176,8 +189,8 @@ export default function LoginPage() {
                 {phoneError && <p className="text-sm text-red-600">{phoneError}</p>}
               </div>
 
-              <Button onClick={handleSendOtp} className="w-full" disabled={isLoading}>
-                {isLoading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Sending OTP...</> : "Send OTP"}
+              <Button onClick={handleSendOtp} className="w-full" disabled={isSubmitting}>
+                {isSubmitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Sending OTP...</> : "Send OTP"}
               </Button>
 
               <div className="relative">
@@ -234,8 +247,8 @@ export default function LoginPage() {
               {error && <p className="text-sm text-red-600 text-center">{error}</p>}
 
               <Button onClick={() => handleVerifyOtp()} className="w-full"
-                disabled={otp.length !== 6 || isLoading}>
-                {isLoading
+                disabled={otp.length !== 6 || isSubmitting}>
+                {isSubmitting
                   ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Verifying...</>
                   : "Verify & Log In"}
               </Button>
@@ -278,8 +291,8 @@ export default function LoginPage() {
 
               {error && <p className="text-sm text-red-600 text-center">{error}</p>}
 
-              <Button type="submit" className="w-full" disabled={isLoading}>
-                {isLoading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Logging in...</> : "Log In"}
+              <Button type="submit" className="w-full" disabled={isSubmitting}>
+                {isSubmitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Logging in...</> : "Log In"}
               </Button>
 
               <div className="relative">

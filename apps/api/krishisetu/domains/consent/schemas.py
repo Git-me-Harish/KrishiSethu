@@ -81,8 +81,8 @@ class ConsentNoticeResponse(BaseModel):
 
 __all__ = [
     "ConsentGrantRequest",
-    "ConsentWithdrawRequest",
+    "ConsentNoticeResponse",
     "ConsentRecord",
     "ConsentStatusResponse",
-    "ConsentNoticeResponse",
+    "ConsentWithdrawRequest",
 ]

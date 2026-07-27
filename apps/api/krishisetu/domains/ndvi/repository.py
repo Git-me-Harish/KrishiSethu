@@ -9,7 +9,7 @@ Handles:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -24,7 +24,6 @@ from krishisetu.domains.ndvi.models import (
     NDVIObservation,
     NDVISource,
 )
-
 
 # ---------------------------------------------------------------------------
 # NDVI Observation queries
@@ -192,7 +191,7 @@ async def list_plots_needing_refresh(
 
     Returns a list of dicts with plot_id, farmer_id, district, state, last_observed_at.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
 
     query = text("""
         SELECT p.id as plot_id, p.farmer_id, p.district, p.state,
@@ -335,7 +334,7 @@ async def acknowledge_anomaly(
     """Acknowledge or resolve an anomaly alert."""
     # If resolution notes are provided, mark as resolved; else just acknowledge
     new_status = NDVIAnomalyStatus.RESOLVED if resolution_notes else NDVIAnomalyStatus.ACKNOWLEDGED
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     update_values: dict[str, Any] = {
         "status": new_status.value,
@@ -378,7 +377,7 @@ async def get_district_ndvi_stats(
     - Health distribution (healthy/moderate/sparse/bare)
     - Active anomaly count
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    cutoff = datetime.now(UTC) - timedelta(days=days_back)
 
     query = text("""
         SELECT
@@ -389,8 +388,10 @@ async def get_district_ndvi_stats(
             MAX(latest.ndvi_max) as max_ndvi,
             COUNT(DISTINCT p.id) as plot_count,
             COUNT(DISTINCT CASE WHEN latest.ndvi_mean >= 0.6 THEN p.id END) as healthy_plots,
-            COUNT(DISTINCT CASE WHEN latest.ndvi_mean >= 0.3 AND latest.ndvi_mean < 0.6 THEN p.id END) as moderate_plots,
-            COUNT(DISTINCT CASE WHEN latest.ndvi_mean >= 0.1 AND latest.ndvi_mean < 0.3 THEN p.id END) as sparse_plots,
+            COUNT(DISTINCT CASE WHEN latest.ndvi_mean >= 0.3 AND latest.ndvi_mean < 0.6
+                  THEN p.id END) as moderate_plots,
+            COUNT(DISTINCT CASE WHEN latest.ndvi_mean >= 0.1 AND latest.ndvi_mean < 0.3
+                  THEN p.id END) as sparse_plots,
             COUNT(DISTINCT CASE WHEN latest.ndvi_mean < 0.1 THEN p.id END) as bare_plots,
             COUNT(DISTINCT na.id) as active_anomalies
         FROM farmer.plots p

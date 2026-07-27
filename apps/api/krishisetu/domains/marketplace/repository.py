@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, desc, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.domains.marketplace.models import (
@@ -17,11 +17,8 @@ from krishisetu.domains.marketplace.models import (
     PaymentStatus,
     Product,
     ProductCategory,
-    Shipment,
     Supplier,
-    SupplierStatus,
 )
-
 
 # ---------------------------------------------------------------------------
 # Category queries
@@ -61,7 +58,7 @@ async def list_products(
     page_size: int = 20,
 ) -> tuple[list[dict[str, Any]], int]:
     """List products with filters and pagination."""
-    conditions = [Product.is_active == True]
+    conditions = [Product.is_active.is_(True)]
 
     if category_slug:
         conditions.append(ProductCategory.slug == category_slug)
@@ -110,7 +107,11 @@ async def list_products(
         params["category_slug"] = category_slug
 
     if search:
-        query = text(str(query) + " AND (p.name ILIKE :search OR p.description ILIKE :search OR p.brand ILIKE :search)")
+        query = text(
+            str(query)
+            + " AND (p.name ILIKE :search OR p.description ILIKE :search"
+            + " OR p.brand ILIKE :search)"
+        )
         params["search"] = f"%{search}%"
 
     if linked_disease_slug:
@@ -205,7 +206,7 @@ async def update_product_stock(
         .values(
             stock_quantity=max(0, new_stock),
             is_in_stock=new_stock > 0,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
         )
     )
     await db.flush()
@@ -271,7 +272,7 @@ async def create_order(
         shipping_state=shipping_state,
         shipping_pincode=shipping_pincode,
         payment_method=payment_method,
-        placed_at=datetime.now(timezone.utc),
+        placed_at=datetime.now(UTC),
     )
     db.add(order)
     await db.flush()
@@ -433,7 +434,7 @@ async def update_order_status(
     delivered_by: UUID | None = None,
 ) -> dict[str, Any] | None:
     """Update an order's status."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     update_values: dict[str, Any] = {
         "status": new_status.value,
         "updated_at": now,
@@ -462,7 +463,9 @@ async def get_farmer_marketplace_stats(
     query = text("""
         SELECT
             COUNT(*) as total_orders,
-            COUNT(*) FILTER (WHERE status IN ('placed', 'confirmed', 'packed', 'shipped', 'out_for_delivery')) as pending_orders,
+            COUNT(*) FILTER (
+                WHERE status IN ('placed', 'confirmed', 'packed', 'shipped', 'out_for_delivery')
+            ) as pending_orders,
             COUNT(*) FILTER (WHERE status IN ('delivered', 'completed')) as completed_orders,
             COALESCE(SUM(total_amount), 0) as total_spent
         FROM commerce.orders
@@ -577,6 +580,7 @@ def _row_to_order_item_dict(row: Any) -> dict[str, Any]:
     return {
         "id": row.id,
         "product_id": row.product_id,
+        "supplier_id": row.supplier_id,
         "product_name": row.product_name,
         "product_image_url": getattr(row, "product_image_url", None),
         "unit_price": Decimal(str(row.unit_price)),

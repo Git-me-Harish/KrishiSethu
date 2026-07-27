@@ -34,12 +34,15 @@ class PaymentProviderEnum(str, Enum):
 
 
 class CreatePaymentRequest(BaseModel):
-    """Request to create a new payment."""
+    """Request to create a new payment.
+
+    The amount is NOT accepted from the client — it is derived server-side
+    from the referenced marketplace order / insurance policy.
+    """
 
     payment_type: PaymentTypeEnum
     reference_id: UUID
     reference_type: str = Field(..., description="order, insurance_policy")
-    amount: Decimal = Field(..., gt=0, description="Amount in ₹")
     description: str | None = None
 
 
@@ -69,7 +72,12 @@ class VerifyPaymentRequest(BaseModel):
     """Request to verify a completed payment (from Razorpay callback)."""
 
     payment_id: UUID
-    provider_payment_id: str = Field(..., description="Razorpay payment ID (pay_XXXXX)")
+    provider_payment_id: str = Field(
+        ...,
+        pattern=r"^pay_[A-Za-z0-9]+$",
+        max_length=64,
+        description="Razorpay payment ID (pay_XXXXX)",
+    )
     provider_order_id: str = Field(..., description="Razorpay order ID (order_XXXXX)")
     provider_signature: str = Field(..., description="Razorpay signature")
     payment_method: str | None = Field(default=None, description="upi, card, netbanking")
@@ -109,15 +117,21 @@ class RefundRequest(BaseModel):
     """Request to process a refund."""
 
     payment_id: UUID
-    amount: Decimal | None = Field(default=None, gt=0, description="Partial refund amount. If None, full refund.")
+    amount: Decimal | None = Field(
+        default=None, gt=0, description="Partial refund amount. If None, full refund."
+    )
     reason: str = Field(..., min_length=5, max_length=500)
 
 
 class ReleaseEscrowRequest(BaseModel):
-    """Request to release escrow to supplier."""
+    """Request to release escrow to supplier.
+
+    `released_to_user_id` is accepted for backwards compatibility only — the
+    payee is always derived server-side from the order's supplier.
+    """
 
     payment_id: UUID
-    released_to_user_id: UUID
+    released_to_user_id: UUID | None = None
 
 
 class WebhookPayload(BaseModel):

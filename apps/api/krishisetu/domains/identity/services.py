@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,11 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from krishisetu.core.config import settings
 from krishisetu.core.exceptions import (
     AuthenticationError,
-    ConflictError,
     RateLimitExceededError,
     ValidationError,
 )
 from krishisetu.core.logging import get_logger
+from krishisetu.core.rate_limiter import check_ip_rate_limit
 from krishisetu.core.redis import get_redis
 from krishisetu.core.security import (
     create_access_token,
@@ -24,9 +26,9 @@ from krishisetu.core.security import (
     decode_token,
     generate_otp,
 )
-from krishisetu.core.sms import get_sms_backend
-from krishisetu.domains.identity.models import User, UserRole
+from krishisetu.core.sms import ConsoleSMSBackend, get_sms_backend
 from krishisetu.domains.identity import repository as repo
+from krishisetu.domains.identity.models import User
 from krishisetu.domains.identity.schemas import (
     TokenResponse,
     UserPublic,
@@ -49,8 +51,44 @@ ACCOUNT_LOCKOUT_THRESHOLD = 5
 ACCOUNT_LOCKOUT_DURATION_MINUTES = 15
 ACCOUNT_LOCKOUT_EXTENDED_MINUTES = 24 * 60
 
+# Exponential backoff for repeated password failures, in minutes: the Nth
+# failure past the threshold waits 2^N minutes, capped at 24h.
+ACCOUNT_LOCKOUT_BASE_MINUTES = 1
+
 # TTL for Google OAuth CSRF state token stored in Redis
 GOOGLE_OAUTH_STATE_TTL_SECONDS = 10 * 60
+
+# TTL for the single-use code that the frontend exchanges for a token pair.
+# Short by design: it exists only to survive one browser redirect.
+OAUTH_EXCHANGE_CODE_TTL_SECONDS = 60
+
+# Single error message for every password-login failure — see
+# login_with_password for why the previous per-case messages were a problem.
+_INVALID_CREDENTIALS = "Invalid credentials"
+
+# Bcrypt hash of a value nobody can supply, used to burn the same CPU on the
+# "no such user" path as on a real verify. Built lazily so importing this
+# module doesn't pay for a bcrypt round.
+_DUMMY_PASSWORD_HASH: str | None = None
+
+
+def _dummy_password_hash() -> str:
+    """A real bcrypt hash to verify against when there is no user to check."""
+    global _DUMMY_PASSWORD_HASH
+    if _DUMMY_PASSWORD_HASH is None:
+        from krishisetu.core.security import hash_password
+
+        _DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
+    return _DUMMY_PASSWORD_HASH
+
+
+def _lockout_minutes(failed_count: int) -> int:
+    """Backoff duration for a given consecutive-failure count."""
+    overrun = failed_count - ACCOUNT_LOCKOUT_THRESHOLD
+    return min(
+        ACCOUNT_LOCKOUT_BASE_MINUTES * (2**overrun),
+        ACCOUNT_LOCKOUT_EXTENDED_MINUTES,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +103,7 @@ async def send_otp(
 ) -> dict[str, Any]:
     """Generate and dispatch an OTP to the given phone number."""
     redis = await get_redis()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     hour_key = f"otp:rl:{phone}:{purpose}:hour:{now.strftime('%Y%m%d%H')}"
     day_key = f"otp:rl:{phone}:{purpose}:day:{now.strftime('%Y%m%d')}"
@@ -83,16 +121,12 @@ async def send_otp(
         ttl = await redis.ttl(cooldown_key)
         raise RateLimitExceededError(retry_after_seconds=max(ttl, 1))
 
-    if purpose == "signup":
-        existing = await repo.get_user_by_phone(db, phone)
-        if existing:
-            raise ConflictError("Phone number already registered. Use login instead.")
-
-    if purpose == "login":
-        existing = await repo.get_user_by_phone(db, phone)
-        if existing and not existing.is_active:
-            raise AuthenticationError("Account is deactivated. Contact support.")
-
+    # NOTE: this endpoint deliberately does NOT branch on whether the phone
+    # number is registered. It previously returned 409 for an existing number
+    # on signup and 401 for a deactivated account on login, which let anyone
+    # enumerate the user base one phone number at a time. Both cases now take
+    # the identical path and are resolved at verify time, where the caller has
+    # already had to prove possession of the phone.
     otp = generate_otp(length=6)
     otp_key = f"otp:{phone}:{purpose}"
     attempts_key = f"otp:attempts:{phone}:{purpose}"
@@ -117,13 +151,27 @@ async def send_otp(
 
     logger.info("otp.sent", phone=phone, purpose=purpose, ttl=OTP_TTL_SECONDS)
 
+    # Echo the OTP back to the caller ONLY when no real SMS was sent — i.e.
+    # the console backend is active, so the OTP is already on stdout and the
+    # response reveals nothing new. Gating on ENV was wrong: a production
+    # deployment left on the default ENV, or a staging box, would hand every
+    # caller a valid OTP for any phone number.
+    #
+    # The `not is_production` conjunct is not redundant: get_sms_backend()
+    # silently falls back to the console backend when no gateway is
+    # configured, so backend-alone would turn a production misconfiguration
+    # into "hand any caller an OTP for any phone number".
+    is_console_backend = (
+        isinstance(sms_backend, ConsoleSMSBackend) and not settings().is_production
+    )
+
     return {
         "phone": phone,
         "purpose": purpose,
         "ttl_seconds": OTP_TTL_SECONDS,
         "cooldown_seconds": OTP_COOLDOWN_SECONDS,
         "max_attempts": OTP_VERIFY_MAX_ATTEMPTS,
-        "debug_otp": otp if settings().is_development else None,
+        "debug_otp": otp if is_console_backend else None,
     }
 
 
@@ -248,7 +296,7 @@ async def _issue_tokens(
     refresh_token, jti = create_refresh_token(user.id)
 
     token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
-    expires_at = datetime.now(timezone.utc) + timedelta(
+    expires_at = datetime.now(UTC) + timedelta(
         days=settings().JWT_REFRESH_TOKEN_EXPIRE_DAYS
     )
 
@@ -272,7 +320,7 @@ async def _issue_tokens(
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
-        token_type="bearer",
+        token_type="bearer",  # noqa: S106 -- OAuth token type, not a credential
         expires_in=settings().JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         user=UserPublic.model_validate(user),
     )
@@ -325,9 +373,10 @@ async def refresh_access_token(
     if not user or not user.is_active:
         raise AuthenticationError("User account is not active")
 
-    if user.is_locked:
-        raise AuthenticationError("Account is temporarily locked")
-
+    # Deliberately NOT gated on user.is_locked. The lockout counter exists to
+    # slow down password guessing; refusing to refresh an already-issued
+    # session as well meant anyone who knew a user's phone or email could
+    # forcibly log them out of every device by failing five logins.
     await repo.revoke_refresh_token(db, jti, reason="rotation")
 
     return await _issue_tokens(db, user, device_info=device_info, ip_address=ip_address)
@@ -374,7 +423,15 @@ async def login_with_password(
     device_info: str | None = None,
     ip_address: str | None = None,
 ) -> TokenResponse:
-    """Login with phone/email + password (admin/officer accounts only)."""
+    """Login with phone/email + password (admin/officer accounts only).
+
+    Every failure path returns exactly the same error. The endpoint used to
+    distinguish "no such user" (bare "Invalid credentials"), "OTP-only
+    account" ("Password login is not enabled"), "deactivated", "locked", and
+    "wrong password" (which helpfully counted down the remaining attempts) —
+    four oracles for probing which phone numbers and emails are registered
+    and what kind of account they are.
+    """
     from krishisetu.core.security import normalize_indian_phone, verify_password
 
     user = None
@@ -387,41 +444,49 @@ async def login_with_password(
     if not user and "@" in phone_or_email:
         user = await repo.get_user_by_email(db, phone_or_email)
 
-    if not user:
-        raise AuthenticationError("Invalid credentials")
-
-    if not user.is_active:
-        raise AuthenticationError("Account is deactivated")
-
-    if user.is_locked:
-        raise AuthenticationError(
-            "Account is temporarily locked. Try again later or contact support."
+    # Per-IP backstop, checked before touching the per-account counter, so a
+    # remote attacker cannot lock arbitrary accounts out for free: they run
+    # out of requests from their own address long before the victim's account
+    # runs out of attempts.
+    if ip_address:
+        allowed, retry_after = await check_ip_rate_limit(
+            bucket="login-password-fail",
+            identifier=ip_address,
+            rate=settings().RATE_LIMIT_AUTH,
         )
+        if not allowed:
+            raise RateLimitExceededError(retry_after_seconds=retry_after)
 
-    if not user.password_hash:
-        raise AuthenticationError(
-            "Password login is not enabled for this account. Use OTP login."
-        )
+    # Constant-time-ish dummy verify on the miss path: without it, a request
+    # for an unknown identifier returns in microseconds while a known one
+    # pays for a bcrypt comparison, which is a timing oracle for account
+    # existence regardless of how uniform the error messages are.
+    if user is None or not user.password_hash:
+        verify_password(password, _dummy_password_hash())
+        raise AuthenticationError(_INVALID_CREDENTIALS)
+
+    if not user.is_active or user.is_locked:
+        verify_password(password, _dummy_password_hash())
+        raise AuthenticationError(_INVALID_CREDENTIALS)
 
     if not verify_password(password, user.password_hash):
         failed_count = await repo.increment_failed_login(db, user.id)
 
         if failed_count >= ACCOUNT_LOCKOUT_THRESHOLD:
-            await repo.lock_account(db, user.id, ACCOUNT_LOCKOUT_DURATION_MINUTES)
+            # Exponential backoff rather than a flat 15-minute wall: the first
+            # overrun costs a minute, and only a sustained attack escalates to
+            # hours. A hard lock let anyone freeze a known account for 15
+            # minutes at a time, indefinitely, for the price of 5 requests.
+            lock_minutes = _lockout_minutes(failed_count)
+            await repo.lock_account(db, user.id, lock_minutes)
             logger.warning(
                 "account.locked",
                 user_id=str(user.id),
                 failed_count=failed_count,
-            )
-            raise AuthenticationError(
-                "Account locked due to too many failed attempts. "
-                f"Try again in {ACCOUNT_LOCKOUT_DURATION_MINUTES} minutes."
+                lock_minutes=lock_minutes,
             )
 
-        remaining = ACCOUNT_LOCKOUT_THRESHOLD - failed_count
-        raise AuthenticationError(
-            f"Invalid credentials. {remaining} attempt(s) remaining before account lock."
-        )
+        raise AuthenticationError(_INVALID_CREDENTIALS)
 
     await repo.reset_failed_login(db, user.id)
     await repo.update_last_login(db, user.id)
@@ -434,44 +499,96 @@ async def login_with_password(
 # ---------------------------------------------------------------------------
 
 
-async def generate_google_oauth_state() -> str:
-    """Generate and store a one-time CSRF state token for Google OAuth (10-min TTL)."""
+def _sign_oauth_state(state: str) -> str:
+    """HMAC a state value with the app secret, for the browser-bound cookie."""
+    secret = settings().JWT_SECRET.get_secret_value().encode("utf-8")
+    return hmac.new(secret, state.encode("ascii"), "sha256").hexdigest()
+
+
+def build_oauth_state_cookie(state: str) -> str:
+    """Cookie value binding an OAuth state to this browser: "<state>.<sig>"."""
+    return f"{state}.{_sign_oauth_state(state)}"
+
+
+def verify_oauth_state_cookie(cookie_value: str | None, state: str) -> bool:
+    """Check that the callback's `state` matches the signed cookie we set.
+
+    This is what actually makes `state` a CSRF defence. Storing state only in
+    Redis proved that *someone* started a flow on this server, not that the
+    browser completing it is the one that started it — so an attacker could
+    start their own flow and feed the victim the resulting callback URL,
+    silently signing the victim into the attacker's account.
+    """
+    if not cookie_value:
+        return False
+    cookie_state, _, signature = cookie_value.partition(".")
+    if not cookie_state or not signature:
+        return False
+    if not hmac.compare_digest(cookie_state, state):
+        return False
+    return hmac.compare_digest(_sign_oauth_state(cookie_state), signature)
+
+
+async def generate_google_oauth_state() -> tuple[str, str]:
+    """Start an OAuth flow: mint a state + PKCE verifier (10-min TTL).
+
+    Returns (state, code_challenge). The caller must set the state cookie
+    from build_oauth_state_cookie(state) and send code_challenge to Google.
+    """
     redis = await get_redis()
     state = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(64)
+
     await redis.set(
-        f"oauth:google:state:{state}", "1", ex=GOOGLE_OAUTH_STATE_TTL_SECONDS
+        f"oauth:google:state:{state}",
+        code_verifier,
+        ex=GOOGLE_OAUTH_STATE_TTL_SECONDS,
     )
-    return state
+
+    # PKCE S256 challenge: base64url(sha256(verifier)), unpadded.
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return state, code_challenge
 
 
 async def google_oauth_login(
     db: AsyncSession,
     code: str,
     state: str,
+    state_cookie: str | None = None,
     device_info: str | None = None,
     ip_address: str | None = None,
 ) -> TokenResponse:
     """Exchange a Google OAuth authorization code for KrishiSetu JWT tokens.
 
     Flow:
-    1. Verify CSRF state (one-time use)
-    2. Exchange code → Google access token
+    1. Verify state against the signed browser cookie AND the Redis record
+       (one-time use), recovering the PKCE verifier
+    2. Exchange code + verifier → Google access token
     3. Fetch Google user profile
-    4. Find or create KrishiSetu user
+    4. Find or create KrishiSetu user (matched on google_sub)
     5. Issue JWT tokens
     """
     import httpx
 
     redis = await get_redis()
 
-    # 1. Verify and consume state
+    # 1. Verify browser binding, then verify and consume the server-side state
+    if not verify_oauth_state_cookie(state_cookie, state):
+        logger.warning("google_oauth.state_cookie_mismatch")
+        raise AuthenticationError(
+            "Invalid or expired OAuth state. Please try logging in again."
+        )
+
     state_key = f"oauth:google:state:{state}"
-    stored = await redis.get(state_key)
-    if not stored:
+    code_verifier = await redis.get(state_key)
+    if not code_verifier:
         raise AuthenticationError(
             "Invalid or expired OAuth state. Please try logging in again."
         )
     await redis.delete(state_key)
+    if isinstance(code_verifier, bytes):
+        code_verifier = code_verifier.decode()
 
     cfg = settings()
     if not cfg.google_oauth_enabled:
@@ -484,6 +601,7 @@ async def google_oauth_login(
         "client_secret": cfg.GOOGLE_OAUTH_CLIENT_SECRET.get_secret_value(),  # type: ignore[union-attr]
         "redirect_uri": cfg.GOOGLE_OAUTH_REDIRECT_URI,
         "grant_type": "authorization_code",
+        "code_verifier": code_verifier,
     }
 
     try:
@@ -537,10 +655,41 @@ async def google_oauth_login(
         )
 
     google_sub: str = userinfo.get("sub", "")
+    if not google_sub:
+        raise AuthenticationError("Google did not return an account identifier.")
     full_name: str = userinfo.get("name") or email.split("@")[0]
 
-    # 4. Find or create user
-    user = await repo.get_user_by_email(db, email)
+    # 4. Find or create user.
+    #
+    # google_sub is Google's immutable subject id and is matched FIRST. The
+    # previous email-only match was a pre-emptive account takeover: anyone
+    # could create a KrishiSetu account claiming a victim's Gmail address
+    # (PATCH /me accepted any email, unverified), and the first time the
+    # victim signed in with Google they were handed the attacker's account —
+    # along with whatever role and data it carried.
+    user = await repo.get_user_by_google_sub(db, google_sub)
+
+    if user is None:
+        candidate = await repo.get_user_by_email(db, email)
+        # Adopting an existing record by email is only safe when that record's
+        # email was itself verified by us. Otherwise it is an unproven claim.
+        if candidate is not None and candidate.email_verified:
+            user = candidate
+            await repo.update_user(db, user.id, google_sub=google_sub)
+            await db.refresh(user)
+            logger.info(
+                "google_oauth.linked_existing_account",
+                user_id=str(user.id),
+            )
+        elif candidate is not None:
+            logger.warning(
+                "google_oauth.unverified_email_collision",
+                user_id=str(candidate.id),
+            )
+            raise AuthenticationError(
+                "An account already exists for this email address. Log in with "
+                "your phone number and verify your email to link Google sign-in."
+            )
 
     if user is None:
         # Google users don't have a phone — derive a synthetic placeholder.
@@ -557,7 +706,11 @@ async def google_oauth_login(
             email=email,
             phone_verified=False,
         )
-        await repo.update_user(db, user.id, email_verified=True)
+        # email_verified is set from Google's verified claim (checked above),
+        # never from anything the user typed.
+        await repo.update_user(
+            db, user.id, email_verified=True, google_sub=google_sub
+        )
         await db.refresh(user)
 
         logger.info("user.created_via_google", user_id=str(user.id), email=email)
@@ -575,6 +728,47 @@ async def google_oauth_login(
     logger.info("google_oauth.login_success", user_id=str(user.id), email=email)
 
     return await _issue_tokens(db, user, device_info=device_info, ip_address=ip_address)
+
+
+# ---------------------------------------------------------------------------
+# Single-use OAuth exchange codes
+# ---------------------------------------------------------------------------
+
+
+async def store_oauth_exchange_code(token_response: TokenResponse) -> str:
+    """Stash a freshly-issued token pair behind an opaque short-lived code.
+
+    The OAuth callback used to redirect to the frontend with the access and
+    refresh tokens in the query string, which wrote a 30-day refresh token
+    into browser history, the Referer header of the next request, and every
+    proxy and access log along the way. The redirect now carries only this
+    code, which is worthless once redeemed.
+    """
+    redis = await get_redis()
+    code = secrets.token_urlsafe(32)
+    await redis.set(
+        f"oauth:exchange:{code}",
+        token_response.model_dump_json(),
+        ex=OAUTH_EXCHANGE_CODE_TTL_SECONDS,
+    )
+    return code
+
+
+async def consume_oauth_exchange_code(code: str) -> TokenResponse:
+    """Redeem an exchange code exactly once, returning the token pair."""
+    redis = await get_redis()
+    key = f"oauth:exchange:{code}"
+
+    # GETDEL is atomic, so two concurrent redemptions cannot both succeed.
+    raw = await redis.getdel(key)
+    if not raw:
+        raise AuthenticationError(
+            "This sign-in link has expired or was already used. Please try again."
+        )
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+
+    return TokenResponse.model_validate_json(raw)
 
 
 def _derive_synthetic_phone(seed: str) -> str:

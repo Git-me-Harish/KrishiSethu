@@ -22,12 +22,11 @@ test data that varies by location and time.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import math
 import random
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -251,7 +250,9 @@ class IMDClient:
             feels_like_c=Decimal(str(main.get("feels_like", main.get("temp", 25)))),
             temp_min_c=Decimal(str(main.get("temp_min", 20))),
             temp_max_c=Decimal(str(main.get("temp_max", 30))),
-            precipitation_mm=Decimal(str(data.get("rain", {}).get("1h", 0) if data.get("rain") else 0)),
+            precipitation_mm=Decimal(
+                str(data.get("rain", {}).get("1h", 0) if data.get("rain") else 0)
+            ),
             humidity_pct=Decimal(str(main.get("humidity", 60))),
             wind_speed_kmph=Decimal(str(wind.get("speed", 0))),
             wind_direction_deg=Decimal(str(wind.get("deg", 0))),
@@ -261,14 +262,14 @@ class IMDClient:
             weather_description=weather.get("description", ""),
             weather_icon=weather.get("icon", ""),
             observed_at=datetime.fromtimestamp(
-                data.get("dt", datetime.now(timezone.utc).timestamp()),
-                tz=timezone.utc,
+                data.get("dt", datetime.now(UTC).timestamp()),
+                tz=UTC,
             ),
             sunrise_at=datetime.fromtimestamp(
-                sys_data.get("sunrise"), tz=timezone.utc
+                sys_data.get("sunrise"), tz=UTC
             ) if sys_data.get("sunrise") else None,
             sunset_at=datetime.fromtimestamp(
-                sys_data.get("sunset"), tz=timezone.utc
+                sys_data.get("sunset"), tz=UTC
             ) if sys_data.get("sunset") else None,
             raw_data=data,
         )
@@ -310,7 +311,7 @@ class IMDClient:
         random generator, so different districts at the same time get
         different but stable values.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Convert to IST (UTC+5:30)
         ist_now = now + timedelta(hours=5, minutes=30)
         hour = ist_now.hour
@@ -330,8 +331,12 @@ class IMDClient:
 
         # Deterministic seed for stable values within the hour
         seed_str = f"{district}:{state}:{ist_now.strftime('%Y%m%d%H')}"
-        seed = int(hashlib.md5(seed_str.encode()).hexdigest(), 16) % (2**32)
-        rng = random.Random(seed)
+        # Non-cryptographic: seeds a deterministic RNG for synthetic weather
+        # data (dev/fallback mode), not used for any security purpose.
+        seed = int(
+            hashlib.md5(seed_str.encode(), usedforsecurity=False).hexdigest(), 16
+        ) % (2**32)
+        rng = random.Random(seed)  # noqa: S311 -- synthetic data generation, not security
 
         # Add small random variation (±1.5°C)
         temp += rng.uniform(-1.5, 1.5)
@@ -422,8 +427,12 @@ class IMDClient:
             base_temp += lat_adjustment
 
             seed_str = f"{district}:{state}:{forecast_date.isoformat()}"
-            seed = int(hashlib.md5(seed_str.encode()).hexdigest(), 16) % (2**32)
-            rng = random.Random(seed)
+            # Non-cryptographic: seeds a deterministic RNG for synthetic
+            # weather data (dev/fallback mode), not used for security.
+            seed = int(
+                hashlib.md5(seed_str.encode(), usedforsecurity=False).hexdigest(), 16
+            ) % (2**32)
+            rng = random.Random(seed)  # noqa: S311 -- synthetic data generation, not security
 
             temp_min = base_temp - daily_amplitude / 2 + rng.uniform(-2, 2)
             temp_max = base_temp + daily_amplitude / 2 + rng.uniform(-2, 2)
@@ -538,10 +547,10 @@ class IMDClient:
         sunset_ist = sunset_hour_utc + 5.5
 
         sunrise = datetime.combine(
-            target_date, datetime.min.time(), tzinfo=timezone.utc
+            target_date, datetime.min.time(), tzinfo=UTC
         ) + timedelta(hours=sunrise_ist)
         sunset = datetime.combine(
-            target_date, datetime.min.time(), tzinfo=timezone.utc
+            target_date, datetime.min.time(), tzinfo=UTC
         ) + timedelta(hours=sunset_ist)
 
         return sunrise, sunset

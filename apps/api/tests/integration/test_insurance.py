@@ -16,7 +16,6 @@ from uuid import uuid4
 
 import pytest
 
-
 SAMPLE_BOUNDARY = {
     "type": "Polygon",
     "coordinates": [
@@ -70,7 +69,10 @@ class TestInsuranceProductEndpoints:
             assert product["crop_slug"] == "rice"
 
     async def test_products_have_pmfby_premium_rates(self, client):
-        """PMFBY products should have correct premium rates (2% Kharif, 1.5% Rabi, 5% commercial)."""
+        """PMFBY products should have correct premium rates.
+
+        2% Kharif, 1.5% Rabi, 5% commercial.
+        """
         response = await client.get("/api/v1/insurance/products?state=Maharashtra")
         data = response.json()
 
@@ -369,7 +371,10 @@ class TestClaimFilingFlow:
                 "policy_id": policy_id,
                 "claim_type": "localized_risk",
                 "loss_date": "2026-07-15",
-                "loss_description": "Heavy rainfall caused waterlogging in my rice field, resulting in approximately 40% crop loss.",
+                "loss_description": (
+                    "Heavy rainfall caused waterlogging in my rice field, "
+                    "resulting in approximately 40% crop loss."
+                ),
                 "estimated_loss_pct": 40,
             },
             headers=auth_headers,
@@ -423,7 +428,10 @@ class TestClaimFilingFlow:
                 "policy_id": policy_id,
                 "claim_type": "localized_risk",
                 "loss_date": "2026-07-15",
-                "loss_description": "Heavy rainfall caused waterlogging in my rice field, resulting in approximately 40% crop loss.",
+                "loss_description": (
+                    "Heavy rainfall caused waterlogging in my rice field, "
+                    "resulting in approximately 40% crop loss."
+                ),
                 "estimated_loss_pct": 40,
             },
             headers=auth_headers,

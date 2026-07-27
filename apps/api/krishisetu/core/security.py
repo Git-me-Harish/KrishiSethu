@@ -16,8 +16,7 @@ Design decisions:
 from __future__ import annotations
 
 import secrets
-import string
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
@@ -75,16 +74,19 @@ def create_access_token(
     - sub: user ID (string UUID)
     - role: user role (farmer, agri_officer, supplier, insurer, admin)
     - type: "access"
+    - iss / aud: issuer and audience (verified on decode)
     - iat: issued at (Unix timestamp)
     - exp: expiration (Unix timestamp)
     - extra_claims: any additional claims passed by caller
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expire = now + timedelta(minutes=settings().JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
     payload: dict[str, Any] = {
         "sub": str(user_id),
         "role": role,
         "type": "access",
+        "iss": settings().JWT_ISSUER,
+        "aud": settings().JWT_AUDIENCE,
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
@@ -106,13 +108,15 @@ def create_refresh_token(user_id: UUID | str) -> tuple[str, str]:
     Refresh tokens do NOT carry role claims — they are only used to obtain
     new access tokens, which then carry the role.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expire = now + timedelta(days=settings().JWT_REFRESH_TOKEN_EXPIRE_DAYS)
     jti = secrets.token_urlsafe(32)
     payload: dict[str, Any] = {
         "sub": str(user_id),
         "type": "refresh",
         "jti": jti,
+        "iss": settings().JWT_ISSUER,
+        "aud": settings().JWT_AUDIENCE,
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
@@ -132,12 +136,16 @@ def decode_token(token: str, expected_type: TokenType = "access") -> dict[str, A
     - Signature is invalid
     - Token has expired
     - Token type does not match expected_type (e.g., using refresh as access)
+    - iss/aud do not match this deployment, or exp/iat/sub are absent
     """
     try:
         payload = jwt.decode(
             token,
             settings().JWT_SECRET.get_secret_value(),
             algorithms=[settings().JWT_ALGORITHM],
+            issuer=settings().JWT_ISSUER,
+            audience=settings().JWT_AUDIENCE,
+            options={"require": ["exp", "iat", "sub"]},
         )
     except jwt.ExpiredSignatureError as e:
         raise AuthenticationError("Token has expired") from e
@@ -209,7 +217,7 @@ def normalize_indian_phone(phone: str) -> str:
     if len(digits) != 10:
         raise ValueError(f"Phone number must be 10 digits, got {len(digits)}")
 
-    if not digits[0] in "6789":
+    if digits[0] not in "6789":
         raise ValueError("Indian mobile numbers must start with 6, 7, 8, or 9")
 
     return digits
@@ -244,19 +252,58 @@ def validate_aadhaar(aadhaar: str) -> str:
     return digits
 
 
+AADHAAR_HASH_VERSION = "v2"
+
+
 def hash_aadhaar(aadhaar: str) -> str:
-    """Hash an Aadhaar number with a per-application salt.
+    """Hash an Aadhaar number for storage and duplicate detection.
 
-    The platform NEVER stores raw Aadhaar numbers. Only this hash is stored,
-    enabling duplicate detection without exposing the actual number.
+    The platform NEVER stores raw Aadhaar numbers. Only this hash is stored.
 
-    Uses SHA-256 with a salt derived from the JWT_SECRET (application-level
-    salt). For higher security, migrate to per-record salts in Phase 2.
+    Scheme (v2): PBKDF2-HMAC-SHA256 over the normalised digits, keyed by a
+    dedicated AADHAAR_HASH_PEPPER, returned as "v2$<hex>".
+
+    Two deliberate design points:
+
+    - The pepper is a dedicated setting, not JWT_SECRET. Reusing the signing
+      key as a salt meant a routine JWT rotation silently invalidated every
+      stored Aadhaar hash. The pepper must NOT be rotated without a re-KYC
+      campaign — there is no way to recompute hashes without the raw numbers.
+
+    - The hash is deterministic (no per-record salt) because its whole job is
+      duplicate detection via the UNIQUE index on identity.users.aadhaar_hash.
+      A per-record salt would make that index meaningless and turn every
+      duplicate check into a full-table scan of PBKDF2 evaluations. The slow
+      KDF plus a high-entropy pepper is what defends the 10^12 Aadhaar
+      keyspace against offline brute force, not the salt.
+
+    TODO(backfill): rows written before this change hold a bare 64-char
+    SHA-256 digest under the old JWT_SECRET-salted scheme. They cannot be
+    recomputed (the raw Aadhaar is not retained), so they are left untouched
+    and are NOT comparable with v2 hashes — a user who verified under v1 and
+    a different user re-verifying the same Aadhaar under v2 will not collide.
+    Closing this requires re-running e-KYC for affected users (identify them
+    with: aadhaar_hash IS NOT NULL AND aadhaar_hash NOT LIKE 'v2$%') and
+    clearing aadhaar_verified until they do.
     """
     import hashlib
 
-    salt = settings().JWT_SECRET.get_secret_value()
-    return hashlib.sha256(f"{salt}:{aadhaar}".encode()).hexdigest()
+    cfg = settings()
+    pepper = cfg.AADHAAR_HASH_PEPPER
+    if pepper is None:
+        raise RuntimeError(
+            "AADHAAR_HASH_PEPPER is not configured — refusing to hash Aadhaar "
+            "with a fallback secret."
+        )
+
+    digits = "".join(c for c in aadhaar if c.isdigit())
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        digits.encode("ascii"),
+        pepper.get_secret_value().encode("utf-8"),
+        cfg.AADHAAR_HASH_ITERATIONS,
+    )
+    return f"{AADHAAR_HASH_VERSION}${derived.hex()}"
 
 
 # Verhoeff algorithm implementation (for Aadhaar checksum validation)

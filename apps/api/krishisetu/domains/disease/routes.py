@@ -203,7 +203,9 @@ async def list_diseases(
     crop: str | None = Query(default=None, description="Filter by crop slug, e.g., 'rice'"),
     disease_type: str | None = Query(
         default=None,
-        description="Filter by type: fungal, bacterial, viral, pest, nematode, nutrient, environmental",
+        description=(
+            "Filter by type: fungal, bacterial, viral, pest, nematode, nutrient, environmental"
+        ),
     ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
@@ -261,7 +263,7 @@ async def officer_review_queue(
     threshold, requiring manual diagnosis by an agricultural officer.
     """
     return await services.officer_list_review_queue(
-        db, current_user.id, page=page, page_size=page_size
+        db, current_user, page=page, page_size=page_size
     )
 
 
@@ -281,5 +283,5 @@ async def officer_review_report(
     diagnosis. The report status changes from 'officer_review' to 'reviewed'.
     """
     return await services.officer_review_report(
-        db, report_id, current_user.id, payload
+        db, report_id, current_user, payload
     )

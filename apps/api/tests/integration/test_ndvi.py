@@ -15,7 +15,6 @@ from uuid import uuid4
 
 import pytest
 
-
 SAMPLE_BOUNDARY = {
     "type": "Polygon",
     "coordinates": [

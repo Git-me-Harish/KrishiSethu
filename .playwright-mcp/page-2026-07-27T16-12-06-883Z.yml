@@ -1,0 +1,34 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e2]:
+    - link "Back to home" [ref=f1e4] [cursor=pointer]:
+      - /url: /
+    - generic [ref=f1e7]:
+      - generic [ref=f1e8]:
+        - heading "Welcome back" [level=3] [ref=f1e13]
+        - paragraph [ref=f1e14]: Sign in with your email and password
+      - generic [ref=f1e44]:
+        - generic [ref=f1e45]:
+          - text: Email or Phone
+          - textbox "Email or Phone" [ref=f1e50]:
+            - /placeholder: you@example.com or 9876543210
+            - text: demo@krishisetu.local
+        - generic [ref=f1e51]:
+          - text: Password
+          - textbox "Password" [ref=f1e56]:
+            - /placeholder: ••••••••
+            - text: DemoPassw0rd!2026
+        - paragraph [ref=f1e73]: Failed to fetch
+        - button "Log In" [ref=f1e57] [cursor=pointer]
+        - generic [ref=f1e58]: Or continue with
+        - generic [ref=f1e63]:
+          - button "OTP" [ref=f1e64] [cursor=pointer]
+          - button "Google" [ref=f1e67] [cursor=pointer]
+    - paragraph [ref=f1e40]:
+      - text: By logging in, you agree to KrishiSetu's
+      - link "Terms of Service" [ref=f1e41] [cursor=pointer]:
+        - /url: /terms
+      - text: and
+      - link "Privacy Policy" [ref=f1e42] [cursor=pointer]:
+        - /url: /privacy
+      - text: .
+  - alert [ref=f1e43]

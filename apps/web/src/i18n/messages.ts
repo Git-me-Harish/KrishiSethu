@@ -65,20 +65,34 @@ const localeLoaders: Record<Locale, () => Promise<{ messages: Messages }>> = {
 /**
  * Deep merge two message objects, using `fallback` for missing keys.
  */
-function mergeMessages<T extends Record<string, any>>(fallback: T, override: Partial<T>): T {
-  const result: Record<string, any> = { ...fallback };
+function mergeMessagesLoose(
+  fallback: Record<string, unknown>,
+  override: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...fallback };
   for (const key in override) {
+    const fallbackValue = fallback[key];
+    const overrideValue = override[key];
     if (
-      typeof fallback[key] === "object" &&
-      typeof override[key] === "object" &&
-      !Array.isArray(fallback[key])
+      typeof fallbackValue === "object" &&
+      fallbackValue !== null &&
+      typeof overrideValue === "object" &&
+      overrideValue !== null &&
+      !Array.isArray(fallbackValue)
     ) {
-      result[key] = mergeMessages(fallback[key], override[key] as Record<string, any>);
-    } else if (override[key] !== undefined) {
-      result[key] = override[key];
+      result[key] = mergeMessagesLoose(
+        fallbackValue as Record<string, unknown>,
+        overrideValue as Record<string, unknown>,
+      );
+    } else if (overrideValue !== undefined) {
+      result[key] = overrideValue;
     }
   }
-  return result as T;
+  return result;
+}
+
+function mergeMessages<T extends Record<string, unknown>>(fallback: T, override: Partial<T>): T {
+  return mergeMessagesLoose(fallback, override as Record<string, unknown>) as T;
 }
 
 /**

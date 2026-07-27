@@ -11,7 +11,6 @@ Verifies:
 from __future__ import annotations
 
 import io
-from pathlib import Path
 
 import pytest
 from fastapi import UploadFile
@@ -24,7 +23,9 @@ from krishisetu.core.file_upload_security import (
 )
 
 
-def _make_upload(filename: str, content: bytes, content_type: str = "application/octet-stream") -> UploadFile:
+def _make_upload(
+    filename: str, content: bytes, content_type: str = "application/octet-stream"
+) -> UploadFile:
     """Build a FastAPI UploadFile from in-memory bytes."""
     file = UploadFile(filename=filename, file=io.BytesIO(content))
     file.headers = {"content-type": content_type}

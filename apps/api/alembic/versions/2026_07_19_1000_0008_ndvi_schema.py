@@ -6,7 +6,7 @@ Creates:
 
 ndvi_observations stores summary statistics per (plot, observation_time).
 The full NDVI raster is stored in S3 (raster_url) and served via pre-signed URLs.
-With 1M plots × weekly observations × 2 years = ~100M rows, partitioning is essential.
+With 1M plots x weekly observations x 2 years = ~100M rows, partitioning is essential.
 
 Revision ID: 0008
 Revises: 0007
@@ -15,7 +15,7 @@ Create Date: 2026-07-19
 """
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
@@ -23,104 +23,67 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "0008"
-down_revision: Union[str, None] = "0007"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "0007"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
     # --- ndvi_observations (partitioned by month) ---
-    op.create_table(
-        "ndvi_observations",
-        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("plot_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("source", sa.String(20), nullable=False),
-        sa.Column("ndvi_mean", sa.Numeric(5, 4), nullable=False),
-        sa.Column("ndvi_min", sa.Numeric(5, 4), nullable=False),
-        sa.Column("ndvi_max", sa.Numeric(5, 4), nullable=False),
-        sa.Column("ndvi_stddev", sa.Numeric(5, 4), nullable=False),
-        sa.Column("cloud_cover_pct", sa.Numeric(5, 2), nullable=False),
-        sa.Column("valid_pixel_count", sa.Integer(), nullable=False),
-        sa.Column("total_pixel_count", sa.Integer(), nullable=False),
-        sa.Column("raster_url", sa.String(512), nullable=True),
-        sa.Column("thumbnail_url", sa.String(512), nullable=True),
-        sa.Column("raw_metadata", postgresql.JSONB, nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("NOW()"), nullable=False),
-        sa.CheckConstraint(
-            "source IN ('sentinel2', 'landsat8', 'synthetic')",
-            name="ndvi_obs_source_check",
-        ),
-        sa.CheckConstraint(
-            "ndvi_mean >= -1 AND ndvi_mean <= 1",
-            name="ndvi_obs_mean_range_check",
-        ),
-        sa.CheckConstraint(
-            "cloud_cover_pct >= 0 AND cloud_cover_pct <= 100",
-            name="ndvi_obs_cloud_cover_range_check",
-        ),
-        sa.ForeignKeyConstraint(["plot_id"], ["farmer.plots.id"], ondelete="CASCADE", name="ndvi_obs_plot_fk"),
-        sa.UniqueConstraint("plot_id", "observed_at", "source", name="ndvi_obs_plot_time_source_unique"),
-        sa.PrimaryKeyConstraint("id", "observed_at"),
-        schema="intelligence",
-    )
-
-    # Convert to partitioned table
+    # PostgreSQL cannot convert an existing table to a partitioned table via
+    # ALTER TABLE ... PARTITION BY — partitioning must be declared at CREATE
+    # TABLE time. So this is a raw CREATE TABLE instead of op.create_table().
+    # Note: FOREIGN KEY constraints referencing a partitioned table's rows
+    # are fine here since plot_id -> farmer.plots.id is a FK *from* this
+    # table, not to it.
     op.execute("""
-        ALTER TABLE intelligence.ndvi_observations
-        PARTITION BY RANGE (observed_at);
+        CREATE TABLE intelligence.ndvi_observations (
+            id UUID NOT NULL,
+            plot_id UUID NOT NULL,
+            observed_at TIMESTAMPTZ NOT NULL,
+            source VARCHAR(20) NOT NULL,
+            ndvi_mean NUMERIC(5, 4) NOT NULL,
+            ndvi_min NUMERIC(5, 4) NOT NULL,
+            ndvi_max NUMERIC(5, 4) NOT NULL,
+            ndvi_stddev NUMERIC(5, 4) NOT NULL,
+            cloud_cover_pct NUMERIC(5, 2) NOT NULL,
+            valid_pixel_count INTEGER NOT NULL,
+            total_pixel_count INTEGER NOT NULL,
+            raster_url VARCHAR(512),
+            thumbnail_url VARCHAR(512),
+            raw_metadata JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT ndvi_obs_source_check CHECK (source IN ('sentinel2', 'landsat8', 'synthetic')),
+            CONSTRAINT ndvi_obs_mean_range_check CHECK (ndvi_mean >= -1 AND ndvi_mean <= 1),
+            CONSTRAINT ndvi_obs_cloud_cover_range_check CHECK (cloud_cover_pct >= 0 AND cloud_cover_pct <= 100),
+            CONSTRAINT ndvi_obs_plot_fk FOREIGN KEY (plot_id) REFERENCES farmer.plots (id) ON DELETE CASCADE,
+            CONSTRAINT ndvi_obs_plot_time_source_unique UNIQUE (plot_id, observed_at, source),
+            CONSTRAINT ndvi_observations_pkey PRIMARY KEY (id, observed_at)
+        ) PARTITION BY RANGE (observed_at);
     """)
 
     # Create monthly partitions for Jul 2026 - Jun 2027 (12 months)
+    # asyncpg cannot run multiple SQL commands in one prepared statement, so
+    # each partition is its own op.execute() call.
+    for month in range(6, 13):  # 2026-07 to 2026-12
+        start = f"2026-{month:02d}-01"
+        end_year, end_month = (2026, month + 1) if month < 12 else (2027, 1)
+        end = f"{end_year}-{end_month:02d}-01"
+        op.execute(f"""
+            CREATE TABLE intelligence.ndvi_observations_2026_{month:02d}
+            PARTITION OF intelligence.ndvi_observations
+            FOR VALUES FROM ('{start}') TO ('{end}');
+        """)
+    for month in range(1, 7):  # 2027-01 to 2027-06
+        start = f"2027-{month:02d}-01"
+        end = f"2027-{month + 1:02d}-01"
+        op.execute(f"""
+            CREATE TABLE intelligence.ndvi_observations_2027_{month:02d}
+            PARTITION OF intelligence.ndvi_observations
+            FOR VALUES FROM ('{start}') TO ('{end}');
+        """)
+
     op.execute("""
-        CREATE TABLE intelligence.ndvi_observations_2026_07
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
-
-        CREATE TABLE intelligence.ndvi_observations_2026_08
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
-
-        CREATE TABLE intelligence.ndvi_observations_2026_09
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
-
-        CREATE TABLE intelligence.ndvi_observations_2026_10
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
-
-        CREATE TABLE intelligence.ndvi_observations_2026_11
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
-
-        CREATE TABLE intelligence.ndvi_observations_2026_12
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2026-12-01') TO ('2027-01-01');
-
-        CREATE TABLE intelligence.ndvi_observations_2027_01
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2027-01-01') TO ('2027-02-01');
-
-        CREATE TABLE intelligence.ndvi_observations_2027_02
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2027-02-01') TO ('2027-03-01');
-
-        CREATE TABLE intelligence.ndvi_observations_2027_03
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2027-03-01') TO ('2027-04-01');
-
-        CREATE TABLE intelligence.ndvi_observations_2027_04
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2027-04-01') TO ('2027-05-01');
-
-        CREATE TABLE intelligence.ndvi_observations_2027_05
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2027-05-01') TO ('2027-06-01');
-
-        CREATE TABLE intelligence.ndvi_observations_2027_06
-        PARTITION OF intelligence.ndvi_observations
-        FOR VALUES FROM ('2027-06-01') TO ('2027-07-01');
-
         CREATE TABLE intelligence.ndvi_observations_default
         PARTITION OF intelligence.ndvi_observations
         DEFAULT;

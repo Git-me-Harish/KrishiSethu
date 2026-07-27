@@ -19,7 +19,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 # ---------------------------------------------------------------------------
 # Enums (mirrors of model enums)
 # ---------------------------------------------------------------------------
@@ -197,7 +196,7 @@ class DiseaseReportResponse(BaseModel):
     failure_reason: str | None
     created_at: datetime
     updated_at: datetime
-    prediction: "DiseasePredictionResponse | None" = None
+    prediction: DiseasePredictionResponse | None = None
 
 
 class DiseasePredictionResponse(BaseModel):
@@ -215,7 +214,7 @@ class DiseasePredictionResponse(BaseModel):
     is_reliable: bool
     inferred_at: datetime
     # Joined disease info (optional — only if disease exists in catalog)
-    disease: "DiseaseResponse | None" = None
+    disease: DiseaseResponse | None = None
     # Treatment recommendations (joined from disease_treatments)
     treatments: list[DiseaseTreatmentResponse] = Field(default_factory=list)
 

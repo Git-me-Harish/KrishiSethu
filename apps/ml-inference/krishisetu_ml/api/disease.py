@@ -18,12 +18,21 @@ from pydantic import BaseModel, Field
 
 from krishisetu_ml.core.config import settings
 from krishisetu_ml.core.logging import get_logger
+from krishisetu_ml.core.uploads import read_upload_limited
 from krishisetu_ml.models.disease_classifier import (
     get_disease_classifier,
     MIN_CONFIDENCE_THRESHOLD,
 )
 
 logger = get_logger(__name__)
+
+# --- Decompression-bomb defence ---------------------------------------------
+# Image.open() is lazy: a 4 KB PNG can declare 60000x60000 and only allocate
+# ~10 GB later, inside classifier.predict(). Cap what Pillow will decode at
+# all, and reject oversized dimensions explicitly right after open().
+MAX_IMAGE_PIXELS = 40_000_000  # 40 MP — far above any phone camera photo
+MAX_IMAGE_DIMENSION = 10_000  # px, per side
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 router = APIRouter(prefix="/predict", tags=["inference"])
 
@@ -90,14 +99,9 @@ async def predict_disease(
             f"Allowed: {', '.join(sorted(allowed_types))}",
         )
 
-    # --- Read file contents ---
-    contents = await file.read()
+    # --- Read file contents (streamed; aborts as soon as the limit is hit) ---
     max_size = settings().MAX_IMAGE_SIZE_MB * 1024 * 1024
-    if len(contents) > max_size:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Image too large: {len(contents)} bytes. Max: {max_size} bytes.",
-        )
+    contents = await read_upload_limited(file, max_size)
 
     if not contents:
         raise HTTPException(
@@ -108,11 +112,28 @@ async def predict_disease(
     # --- Decode image ---
     try:
         image = Image.open(io.BytesIO(contents))
-    except UnidentifiedImageError as e:
+    except (UnidentifiedImageError, Image.DecompressionBombError) as e:
+        logger.warning("predict.decode_failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Could not decode image: {e}",
+            detail="Could not decode image",
         ) from e
+
+    # --- Reject decompression bombs before anything allocates the pixels ---
+    width, height = image.size
+    if (
+        width > MAX_IMAGE_DIMENSION
+        or height > MAX_IMAGE_DIMENSION
+        or width * height > MAX_IMAGE_PIXELS
+    ):
+        logger.warning("predict.image_too_large", width=width, height=height)
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"Image dimensions too large: {width}x{height}. "
+                f"Max {MAX_IMAGE_DIMENSION}px per side, {MAX_IMAGE_PIXELS} pixels total."
+            ),
+        )
 
     # --- Run inference ---
     try:
@@ -125,10 +146,12 @@ async def predict_disease(
             detail="Model not loaded. Service may be starting up.",
         ) from e
     except Exception as e:
+        # Never echo the exception text: it leaks model paths, tensor shapes
+        # and execution-provider names. The logger above keeps the details.
         logger.exception("predict.inference_failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Inference failed: {e}",
+            detail="Inference failed",
         ) from e
 
     total_time_ms = int((time.perf_counter() - start_time) * 1000)

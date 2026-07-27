@@ -17,7 +17,6 @@ from uuid import uuid4
 
 import pytest
 
-
 # Sample GeoJSON polygon — a small square in Pune, India (~0.01 ha)
 SAMPLE_BOUNDARY = {
     "type": "Polygon",

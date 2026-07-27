@@ -19,7 +19,7 @@ from krishisetu.core.config import settings
 from krishisetu.core.database import Base
 
 # Import all model modules here so they are registered with Base.metadata
-# from krishisetu.domains.identity.models import User  # noqa: F401  (Phase 1+)
+# from krishisetu.domains.identity.models import User
 
 # this is the Alembic Config object
 config = context.config

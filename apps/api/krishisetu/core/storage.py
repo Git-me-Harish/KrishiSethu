@@ -28,9 +28,8 @@ All S3 keys follow a structured path convention:
 from __future__ import annotations
 
 import asyncio
-import io
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import boto3
@@ -92,21 +91,31 @@ class StorageClient:
     # Pre-signed URL generation
     # -----------------------------------------------------------------------
 
+    # Hard ceiling applied to every pre-signed upload, regardless of context.
+    MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
     def generate_upload_url(
         self,
         key: str,
         content_type: str = "image/jpeg",
         expires_in: int = 900,
+        max_size_bytes: int | None = None,
     ) -> str:
         """Generate a pre-signed URL for uploading an object.
 
         The client uses this URL with HTTP PUT to upload the file directly
         to S3, bypassing the API. The URL expires after `expires_in` seconds.
 
+        Note: a PUT pre-signed URL cannot carry a `content-length-range`
+        condition — only the POST policy form can (see
+        `generate_upload_post`). The size ceiling is therefore also enforced
+        server-side when the uploaded object is claimed.
+
         Args:
             key: S3 object key (e.g., "disease-reports/{farmer_id}/{report_id}/original.jpg")
             content_type: Expected MIME type of the upload
             expires_in: URL validity in seconds (default 15 minutes)
+            max_size_bytes: advisory size ceiling for the caller
 
         Returns:
             Pre-signed URL string.
@@ -121,6 +130,42 @@ class StorageClient:
             ExpiresIn=expires_in,
         )
         return url
+
+    def generate_upload_post(
+        self,
+        key: str,
+        content_type: str = "image/jpeg",
+        expires_in: int = 900,
+        max_size_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """Generate a pre-signed POST policy with a hard size limit.
+
+        Unlike a pre-signed PUT URL, the POST policy carries a
+        `content-length-range` condition, so S3 itself rejects an oversized
+        upload before a byte is stored.
+
+        Returns a dict with `url` and `fields` to be posted as multipart form
+        data, with the file as the last field.
+        """
+        limit = min(max_size_bytes or self.MAX_UPLOAD_BYTES, self.MAX_UPLOAD_BYTES)
+        return self._client.generate_presigned_post(
+            Bucket=self._bucket,
+            Key=key,
+            Fields={"Content-Type": content_type},
+            Conditions=[
+                {"Content-Type": content_type},
+                ["content-length-range", 1, limit],
+            ],
+            ExpiresIn=expires_in,
+        )
+
+    def object_size(self, key: str) -> int | None:
+        """Return an object's size in bytes, or None if it does not exist."""
+        try:
+            response = self._client.head_object(Bucket=self._bucket, Key=key)
+        except ClientError:
+            return None
+        return int(response.get("ContentLength", 0))
 
     def generate_download_url(
         self,
@@ -221,11 +266,13 @@ class StorageClient:
     @staticmethod
     def voice_recording_key(user_id: uuid.UUID, timestamp: datetime | None = None) -> str:
         """Generate S3 key for a voice recording."""
-        ts = timestamp or datetime.now(timezone.utc)
+        ts = timestamp or datetime.now(UTC)
         return f"voice/{user_id}/{ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.wav"
 
     @staticmethod
-    def product_image_key(supplier_id: uuid.UUID, product_id: uuid.UUID, suffix: str = "main.jpg") -> str:
+    def product_image_key(
+        supplier_id: uuid.UUID, product_id: uuid.UUID, suffix: str = "main.jpg"
+    ) -> str:
         """Generate S3 key for a marketplace product image."""
         return f"products/{supplier_id}/{product_id}/{suffix}"
 

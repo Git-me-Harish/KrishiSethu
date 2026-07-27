@@ -24,9 +24,14 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.core.exceptions import (
-    ConflictError,
     NotFoundError,
     ValidationError,
+)
+from krishisetu.core.file_upload_security import (
+    FileValidationError,
+    UploadContext,
+    max_size_for,
+    validate_file_bytes,
 )
 from krishisetu.core.logging import get_logger
 from krishisetu.core.storage import get_storage
@@ -51,11 +56,11 @@ from krishisetu.domains.disease.schemas import (
     UploadUrlResponse,
 )
 from krishisetu.domains.farmer import repository as farmer_repo
-from krishisetu.domains.identity.permissions import (
-    PERM_DISEASE_REPORT_READ_DISTRICT,
-    PERM_DISEASE_REPORT_REVIEW,
-    PERM_DISEASE_REPORT_SUBMIT,
+from krishisetu.domains.farmer.officer_scope import (
+    require_within_jurisdiction,
+    resolve_officer_jurisdiction,
 )
+from krishisetu.domains.identity.models import User
 
 logger = get_logger(__name__)
 
@@ -92,6 +97,7 @@ async def generate_upload_url(
         key=image_key,
         content_type=content_type,
         expires_in=900,  # 15 minutes
+        max_size_bytes=max_size_for(UploadContext.DISEASE_IMAGE),
     )
 
     logger.info(
@@ -106,6 +112,25 @@ async def generate_upload_url(
         expires_in_seconds=900,
         max_size_bytes=10 * 1024 * 1024,
     )
+
+
+def _validate_own_image_key(image_key: str, farmer_id: UUID) -> None:
+    """Reject an image key that does not live under the caller's own prefix.
+
+    Keys are generated as `disease-reports/{farmer_id}/{report_id}/{suffix}`.
+    Anything else would let a farmer point a report — and therefore a
+    pre-signed download URL — at another user's object.
+    """
+    expected_prefix = f"disease-reports/{farmer_id}/"
+    if (
+        not image_key
+        or not image_key.startswith(expected_prefix)
+        or ".." in image_key
+    ):
+        raise ValidationError(
+            "image_key must be an upload key issued to this account "
+            "(disease-reports/{farmer_id}/...)."
+        )
 
 
 def _suffix_for_content_type(content_type: str) -> str:
@@ -139,11 +164,35 @@ async def submit_disease_report(
     """
     storage = get_storage()
 
-    # Verify image was uploaded
-    if not storage.object_exists(payload.image_key):
+    # The image key is client-supplied and ends up in a pre-signed download
+    # URL, so it must stay inside the caller's own prefix.
+    _validate_own_image_key(payload.image_key, farmer_id)
+
+    # Verify image was uploaded, and that what was uploaded is really an
+    # image of an acceptable size (the pre-signed PUT itself cannot enforce
+    # either — see core.storage.generate_upload_url).
+    size = storage.object_size(payload.image_key)
+    if size is None:
         raise ValidationError(
             "Image not found. Please upload the image first using the upload URL."
         )
+
+    max_size = max_size_for(UploadContext.DISEASE_IMAGE)
+    if size > max_size:
+        storage.delete_object(payload.image_key)
+        raise ValidationError(
+            f"Image exceeds the {max_size // (1024 * 1024)} MB limit."
+        )
+
+    try:
+        validate_file_bytes(
+            await storage.download_bytes_async(payload.image_key),
+            filename=payload.image_key.rsplit("/", 1)[-1],
+            context=UploadContext.DISEASE_IMAGE,
+        )
+    except FileValidationError:
+        storage.delete_object(payload.image_key)
+        raise
 
     # Verify plot ownership (if provided)
     if payload.plot_id:
@@ -412,14 +461,20 @@ async def get_disease(db: AsyncSession, slug: str) -> DiseaseResponse:
 
 async def officer_list_review_queue(
     db: AsyncSession,
-    officer_id: UUID,
+    officer: User,
     *,
     page: int = 1,
     page_size: int = 20,
 ) -> DiseaseReportListResponse:
-    """List disease reports needing officer review (low confidence)."""
+    """List reports needing review, scoped to the officer's own district."""
+    jurisdiction = resolve_officer_jurisdiction(officer)
+
     reports, total = await repo.list_reports_for_officer_review(
-        db, page=page, page_size=page_size
+        db,
+        district=jurisdiction.district if jurisdiction else None,
+        state=jurisdiction.state if jurisdiction else None,
+        page=page,
+        page_size=page_size,
     )
 
     storage = get_storage()
@@ -456,10 +511,39 @@ async def officer_list_review_queue(
 async def officer_review_report(
     db: AsyncSession,
     report_id: UUID,
-    officer_id: UUID,
+    officer: User,
     payload: OfficerReviewRequest,
 ) -> DiseaseReportResponse:
-    """Officer submits manual diagnosis for a low-confidence report."""
+    """Officer submits manual diagnosis for a report in their own district."""
+    officer_id = officer.id
+
+    report_dict = await repo.get_disease_report_by_id(db, report_id)
+    if not report_dict:
+        raise NotFoundError("DiseaseReport", str(report_id))
+
+    jurisdiction = resolve_officer_jurisdiction(officer)
+    if jurisdiction is not None:
+        plot_id = report_dict.get("plot_id")
+        plot = (
+            await farmer_repo.get_plot_by_id(db, plot_id, include_boundary=False)
+            if plot_id
+            else None
+        )
+        if not plot:
+            # No plot on the report — fall back to the farmer's own district.
+            in_district = await farmer_repo.farmer_has_plot_in_district(
+                db,
+                report_dict["farmer_id"],
+                jurisdiction.district,
+                jurisdiction.state,
+            )
+            if not in_district:
+                raise NotFoundError("DiseaseReport", str(report_id))
+        else:
+            require_within_jurisdiction(
+                jurisdiction, state=plot.state, district=plot.district
+            )
+
     # Validate disease_slug if provided
     if payload.disease_slug:
         disease = await repo.get_disease_by_slug(

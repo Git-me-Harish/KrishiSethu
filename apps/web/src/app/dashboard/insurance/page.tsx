@@ -222,7 +222,7 @@ export default function InsurancePage() {
                           </span>
                         </div>
                         <p className="text-xs text-slate-500">
-                          {policy.policy_number} · {policy.product?.season?.charAt(0).toUpperCase() + policy.product?.season?.slice(1)} {policy.product?.season_year}
+                          {policy.policy_number} · {policy.product ? policy.product.season.charAt(0).toUpperCase() + policy.product.season.slice(1) : ""} {policy.product?.season_year}
                         </p>
                         <div className="mt-1 flex gap-4 text-xs text-slate-600">
                           <span>Sum: <strong>{formatINR(policy.sum_insured)}</strong></span>

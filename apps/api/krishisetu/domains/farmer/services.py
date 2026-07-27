@@ -23,7 +23,6 @@ ISRIC SoilGrids integration:
 
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -39,18 +38,21 @@ from krishisetu.core.exceptions import (
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.farmer import repository as repo
 from krishisetu.domains.farmer.models import (
-    CropCycleStatus,
     CropSeason,
     IrrigationSource,
     PlotOwnershipType,
     PlotVerificationStatus,
 )
+from krishisetu.domains.farmer.officer_scope import (
+    require_within_jurisdiction,
+    resolve_officer_jurisdiction,
+)
 from krishisetu.domains.farmer.schemas import (
     CropCycleCreate,
     CropCycleResponse,
     CropCycleUpdate,
-    CropResponse,
     CropListResponse,
+    CropResponse,
     PlotBoundaryUpdate,
     PlotCreate,
     PlotListItem,
@@ -59,6 +61,7 @@ from krishisetu.domains.farmer.schemas import (
     PlotStatsResponse,
     PlotUpdate,
 )
+from krishisetu.domains.identity.models import User
 
 logger = get_logger(__name__)
 
@@ -114,7 +117,7 @@ async def create_plot(
     5. Auto-populate soil data from ISRIC (best-effort, async)
     """
     # --- Check plot limit ---
-    existing_plots, total_count = await repo.list_plots_by_farmer(
+    _existing_plots, total_count = await repo.list_plots_by_farmer(
         db, farmer_id, page=1, page_size=1
     )
     if total_count >= MAX_PLOTS_PER_FARMER:
@@ -448,19 +451,23 @@ async def update_crop_cycle(
 
 async def officer_list_district_plots(
     db: AsyncSession,
-    officer_id: UUID,
-    district: str,
-    state: str | None,
+    officer: User,
     *,
     verification_status: PlotVerificationStatus | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> PlotListResponse:
-    """List plots in an officer's district (for verification worklist)."""
+    """List plots in an officer's district (for verification worklist).
+
+    The district/state come from the officer's own assignment, never from the
+    request.
+    """
+    jurisdiction = resolve_officer_jurisdiction(officer)
+
     plots, total = await repo.list_plots_by_district(
         db,
-        district,
-        state=state,
+        jurisdiction.district if jurisdiction else None,
+        state=jurisdiction.state if jurisdiction else None,
         verification_status=verification_status,
         page=page,
         page_size=page_size,
@@ -477,14 +484,20 @@ async def officer_list_district_plots(
 async def officer_verify_plot(
     db: AsyncSession,
     plot_id: UUID,
-    officer_id: UUID,
+    officer: User,
     status: PlotVerificationStatus,
     notes: str | None = None,
 ) -> PlotResponse:
-    """Officer verifies or rejects a plot."""
+    """Officer verifies or rejects a plot in their own district."""
+    officer_id = officer.id
     plot = await repo.get_plot_by_id(db, plot_id, include_boundary=False)
     if not plot:
         raise NotFoundError("Plot", str(plot_id))
+
+    jurisdiction = resolve_officer_jurisdiction(officer)
+    require_within_jurisdiction(
+        jurisdiction, state=plot.state, district=plot.district
+    )
 
     if status not in (
         PlotVerificationStatus.VERIFIED,

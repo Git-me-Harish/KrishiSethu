@@ -19,7 +19,7 @@ This eliminates the bureaucratic burden of manual evidence collection.
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -35,10 +35,11 @@ from krishisetu.core.logging import get_logger
 from krishisetu.core.storage import get_storage
 from krishisetu.domains.disease import repository as disease_repo
 from krishisetu.domains.farmer import repository as farmer_repo
+from krishisetu.domains.identity.models import User
 from krishisetu.domains.insurance import repository as repo
+from krishisetu.domains.insurance.insurer_scope import resolve_insurer_name
 from krishisetu.domains.insurance.models import (
     ClaimStatus,
-    ClaimType,
     PolicyStatus,
 )
 from krishisetu.domains.insurance.schemas import (
@@ -128,8 +129,8 @@ async def estimate_premium(
 ) -> InsuranceProductPremiumEstimate:
     """Estimate premium for a plot+product combination.
 
-    Sum insured = sum_insured_per_ha × plot_area_ha
-    Premium = sum_insured × farmer_premium_rate
+    Sum insured = sum_insured_per_ha x plot_area_ha
+    Premium = sum_insured x farmer_premium_rate
     """
     product = await repo.get_product_by_id(db, product_id)
     if not product:
@@ -254,12 +255,12 @@ async def pay_premium(
     farmer_id: UUID,
     payload: PolicyPremiumPaymentRequest,
 ) -> PolicyResponse:
-    """Mark premium as paid (stub for payment gateway integration).
+    """Activate a policy once its premium payment has actually settled.
 
-    In production, this would:
-    1. Verify payment with the payment gateway (UPI/Razorpay)
-    2. Capture the payment
-    3. Update policy status to active
+    The policy is only activated when a captured (or released), non-refunded
+    payment exists for this policy, owned by the farmer, for at least the
+    premium amount. The client-supplied `payment_reference` is recorded but
+    never trusted as proof of payment.
     """
     policy_dict = await repo.get_policy_by_id(db, policy_id)
     if not policy_dict:
@@ -276,14 +277,30 @@ async def pay_premium(
             f"Policy is in '{policy_dict['status']}' state, cannot accept payment."
         )
 
-    policy = await repo.update_policy_premium_payment(
-        db, policy_id, payload.payment_reference
+    # Require a real settled payment for this policy before activating it.
+    from krishisetu.domains.payment import repository as payment_repo
+
+    payment = await payment_repo.find_settled_payment_for_reference(
+        db,
+        reference_id=policy_id,
+        user_id=farmer_id,
+        min_amount=policy_dict["premium_amount"],
+    )
+    if not payment:
+        raise ValidationError(
+            "No settled premium payment found for this policy. Complete the "
+            "payment via /payments before activating the policy."
+        )
+
+    await repo.update_policy_premium_payment(
+        db, policy_id, payment.payment_number
     )
 
     logger.info(
         "insurance.premium_paid",
         policy_id=str(policy_id),
-        payment_reference=payload.payment_reference,
+        payment_id=str(payment.id),
+        payment_reference=payment.payment_number,
     )
 
     updated_dict = await repo.get_policy_by_id(db, policy_id)
@@ -359,7 +376,6 @@ async def create_claim(
         )
 
     # Check coverage period
-    today = date.today()
     if payload.loss_date < policy_dict["coverage_start_date"]:
         raise ValidationError(
             f"Loss date is before policy coverage start ({policy_dict['coverage_start_date']})"
@@ -403,7 +419,11 @@ async def create_claim(
         claim_id=str(claim.id),
         claim_number=claim_number,
         policy_id=str(payload.policy_id),
-        claim_type=payload.claim_type.value if hasattr(payload.claim_type, 'value') else payload.claim_type,
+        claim_type=(
+            payload.claim_type.value
+            if hasattr(payload.claim_type, "value")
+            else payload.claim_type
+        ),
         claimed_amount=str(claimed_amount),
     )
 
@@ -604,9 +624,9 @@ async def _auto_attach_evidence(
 
     # Define the evidence window (30 days before loss_date to loss_date)
     evidence_start = datetime.combine(
-        loss_date - timedelta(days=30), datetime.min.time(), tzinfo=timezone.utc
+        loss_date - timedelta(days=30), datetime.min.time(), tzinfo=UTC
     )
-    evidence_end = datetime.combine(loss_date, datetime.max.time(), tzinfo=timezone.utc)
+    evidence_end = datetime.combine(loss_date, datetime.max.time(), tzinfo=UTC)
 
     evidence_count = 0
 
@@ -709,7 +729,9 @@ async def _auto_attach_evidence(
                         "title": alert.title,
                         "description": alert.description,
                         "recommended_actions": alert.recommended_actions,
-                        "effective_at": alert.effective_at.isoformat() if alert.effective_at else None,
+                        "effective_at": (
+                            alert.effective_at.isoformat() if alert.effective_at else None
+                        ),
                         "expires_at": alert.expires_at.isoformat() if alert.expires_at else None,
                     },
                     is_auto_attached=True,
@@ -734,17 +756,19 @@ async def _auto_attach_evidence(
 
 async def insurer_list_claims(
     db: AsyncSession,
-    insurer_id: UUID,
+    insurer: User,
     *,
     status: ClaimStatus | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> Any:
-    """List claims for insurer review."""
+    """List claims for insurer review, scoped to the reviewer's insurer."""
     from krishisetu.domains.insurance.schemas import InsurerClaimListResponse
 
+    insurer_name = resolve_insurer_name(insurer)
+
     claims, total = await repo.list_claims_for_insurer(
-        db, status=status, page=page, page_size=page_size
+        db, insurer_name=insurer_name, status=status, page=page, page_size=page_size
     )
     return InsurerClaimListResponse(
         claims=[_to_claim_response(c) for c in claims],
@@ -755,11 +779,18 @@ async def insurer_list_claims(
 async def insurer_review_claim(
     db: AsyncSession,
     claim_id: UUID,
-    insurer_id: UUID,
+    insurer: User,
     payload: InsurerReviewRequest,
 ) -> ClaimResponse:
-    """Insurer reviews a claim (approve/reject/request_evidence)."""
-    claim_dict = await repo.get_claim_by_id(db, claim_id, include_evidence=False)
+    """Insurer reviews a claim (approve/reject/request_evidence).
+
+    The reviewer may only act on claims written against their own insurer's
+    products, and an approval can never exceed the claimed amount or the
+    policy's sum insured.
+    """
+    # include_evidence=True is required: the repository only returns a dict
+    # (rather than an ORM row) on that path.
+    claim_dict = await repo.get_claim_by_id(db, claim_id, include_evidence=True)
     if not claim_dict:
         raise NotFoundError("InsuranceClaim", str(claim_id))
 
@@ -773,10 +804,30 @@ async def insurer_review_claim(
             f"Only submitted/under_review/evidence_requested claims can be reviewed."
         )
 
+    policy_dict = await repo.get_policy_by_id(db, claim_dict["policy_id"])
+    if not policy_dict:
+        raise NotFoundError("InsurancePolicy", str(claim_dict["policy_id"]))
+
+    # Bind the reviewer to the claim's insurer
+    insurer_name = resolve_insurer_name(insurer)
+    if insurer_name:
+        product = policy_dict.get("product") or {}
+        if product.get("insurer_name") != insurer_name:
+            raise NotFoundError("InsuranceClaim", str(claim_id))
+
+    # Clamp the approved amount to what was claimed and to the sum insured
+    if payload.approved_amount is not None:
+        limit = min(claim_dict["claimed_amount"], policy_dict["sum_insured"])
+        if payload.approved_amount > limit:
+            raise ValidationError(
+                f"approved_amount ({payload.approved_amount}) exceeds the "
+                f"claimable maximum ({limit})."
+            )
+
     updated = await repo.insurer_review_claim(
         db,
         claim_id,
-        insurer_id,
+        insurer.id,
         action=payload.action,
         approved_amount=payload.approved_amount,
         review_notes=payload.review_notes,
@@ -788,7 +839,7 @@ async def insurer_review_claim(
         "insurance.claim_reviewed",
         claim_id=str(claim_id),
         action=payload.action,
-        insurer_id=str(insurer_id),
+        insurer_id=str(insurer.id),
     )
 
     return _to_claim_response(updated)
@@ -818,7 +869,7 @@ def _generate_policy_number() -> str:
     Format: KS-POL-{YYYYMMDD}-{8-char-uuid}
     Example: KS-POL-20260719-a1b2c3d4
     """
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    today = datetime.now(UTC).strftime("%Y%m%d")
     short_uuid = uuid.uuid4().hex[:8]
     return f"KS-POL-{today}-{short_uuid}"
 
@@ -828,7 +879,7 @@ def _generate_claim_number() -> str:
 
     Format: KS-CLM-{YYYYMMDD}-{8-char-uuid}
     """
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    today = datetime.now(UTC).strftime("%Y%m%d")
     short_uuid = uuid.uuid4().hex[:8]
     return f"KS-CLM-{today}-{short_uuid}"
 
@@ -883,8 +934,12 @@ def _to_claim_response(claim_dict: dict[str, Any]) -> ClaimResponse:
         if e.file_url:
             try:
                 file_url = storage.generate_download_url(e.file_url)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "insurance.claim_evidence.url_generation_failed",
+                    evidence_id=str(e.id),
+                    error=str(exc),
+                )
 
         evidence_resps.append(
             ClaimEvidenceResponse(

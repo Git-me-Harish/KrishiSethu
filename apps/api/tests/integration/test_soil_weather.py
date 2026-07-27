@@ -14,7 +14,6 @@ from uuid import uuid4
 
 import pytest
 
-
 # Sample plot boundary for creating test plots
 SAMPLE_BOUNDARY = {
     "type": "Polygon",

@@ -252,14 +252,14 @@ def sanitize_url(url: str, *, allowed_schemes: tuple[str, ...] = ("https", "http
     return quote(text, safe=":/?&=#%+@,;")
 
 __all__ = [
-    "InputValidationError",
+    "MAX_FILENAME_LENGTH",
     "MAX_FREE_TEXT_LENGTH",
     "MAX_NAME_LENGTH",
-    "MAX_FILENAME_LENGTH",
+    "InputValidationError",
+    "detect_sql_injection_attempt",
+    "sanitize_filename",
     "sanitize_free_text",
     "sanitize_name",
-    "sanitize_filename",
     "sanitize_sql_like",
-    "detect_sql_injection_attempt",
     "sanitize_url",
 ]

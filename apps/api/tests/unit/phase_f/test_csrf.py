@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
 from krishisetu.core.csrf import (
     CSRF_COOKIE,
-    CSRF_HEADER,
     CSRF_SIGN_COOKIE,
     generate_csrf_token,
     set_csrf_cookies,

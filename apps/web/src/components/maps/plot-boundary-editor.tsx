@@ -117,7 +117,6 @@ export function PlotBoundaryEditor({
       },
       edit: {
         featureGroup: drawnItems,
-        edit: true,
         remove: true,
       },
     });

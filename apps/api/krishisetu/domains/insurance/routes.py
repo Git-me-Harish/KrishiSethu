@@ -48,11 +48,11 @@ from krishisetu.domains.insurance.schemas import (
     ClaimResponse,
     ClaimSubmitRequest,
     ClaimUpdateRequest,
-    InsurerClaimListResponse,
-    InsurerReviewRequest,
     InsuranceProductListResponse,
     InsuranceProductPremiumEstimate,
     InsuranceStatsResponse,
+    InsurerClaimListResponse,
+    InsurerReviewRequest,
     PolicyCreateRequest,
     PolicyListResponse,
     PolicyPremiumPaymentRequest,
@@ -76,7 +76,9 @@ async def list_products(
     crop: str | None = Query(default=None, description="Filter by crop slug"),
     season: str | None = Query(default=None, description="Filter by season (kharif, rabi, zaid)"),
     season_year: int | None = Query(default=None, description="Filter by season year"),
-    product_type: str | None = Query(default=None, description="Filter by type (pmfby, rwbcis, etc.)"),
+    product_type: str | None = Query(
+        default=None, description="Filter by type (pmfby, rwbcis, etc.)"
+    ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
 ) -> InsuranceProductListResponse:
@@ -128,7 +130,7 @@ async def estimate_premium(
     """Estimate premium for a plot+product combination.
 
     Returns:
-    - sum_insured: Total coverage amount (sum_insured_per_ha × area)
+    - sum_insured: Total coverage amount (sum_insured_per_ha x area)
     - premium_amount: Premium the farmer must pay
     - premium_rate: Rate applied (e.g., 0.02 for 2%)
     """
@@ -164,8 +166,8 @@ async def enroll_policy(
     Creates a policy with status=pending. The farmer must then pay the
     premium via POST /insurance/policies/{id}/pay to activate the policy.
 
-    The sum insured is computed as: sum_insured_per_ha × plot_area
-    The premium is computed as: sum_insured × farmer_premium_rate
+    The sum insured is computed as: sum_insured_per_ha x plot_area
+    The premium is computed as: sum_insured x farmer_premium_rate
 
     Bank account details can be provided now or at claim filing time.
     """
@@ -263,7 +265,7 @@ async def create_claim(
     The farmer can review the auto-attached evidence, add manual photo
     evidence, then submit via POST /insurance/claims/{id}/submit.
 
-    The claimed_amount is computed as: sum_insured × (estimated_loss_pct / 100)
+    The claimed_amount is computed as: sum_insured x (estimated_loss_pct / 100)
     """
     return await services.create_claim(db, current_user.id, payload)
 
@@ -377,7 +379,7 @@ async def insurer_list_claims(
     ordered by submission date (oldest first).
     """
     return await services.insurer_list_claims(
-        db, current_user.id, status=status_filter, page=page, page_size=page_size
+        db, current_user, status=status_filter, page=page, page_size=page_size
     )
 
 
@@ -400,5 +402,5 @@ async def insurer_review_claim(
       The farmer will be notified to provide additional evidence.
     """
     return await services.insurer_review_claim(
-        db, claim_id, current_user.id, payload
+        db, claim_id, current_user, payload
     )

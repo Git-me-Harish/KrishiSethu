@@ -26,7 +26,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Query, status
 
-from krishisetu.core.dependencies import CurrentUser, CurrentUserOptional, DBSession, require_permissions
+from krishisetu.core.dependencies import (
+    CurrentUser,
+    CurrentUserOptional,
+    DBSession,
+    require_permissions,
+)
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.identity.permissions import (
     PERM_SCHEME_APPLICATION_REVIEW,
@@ -224,9 +229,9 @@ async def officer_list_applications(
         default=None, alias="status", description="Filter by status"
     ),
 ) -> SchemeApplicationListResponse:
-    """List scheme applications for officer review."""
+    """List scheme applications for officer review (officer's district only)."""
     return await services.officer_list_applications(
-        db, status=status_filter, page=page, page_size=page_size
+        db, current_user, status=status_filter, page=page, page_size=page_size
     )
 
 
@@ -242,5 +247,5 @@ async def officer_review_application(
 ) -> SchemeApplicationResponse:
     """Review a scheme application (approve, reject, request_resubmission, disburse)."""
     return await services.officer_review_application(
-        db, app_id, current_user.id, payload
+        db, app_id, current_user, payload
     )

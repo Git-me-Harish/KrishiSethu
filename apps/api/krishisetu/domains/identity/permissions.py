@@ -6,7 +6,8 @@ granular strings (e.g., "plot:create", "disease:report:submit") used by the
 
 To add a new permission:
 1. Add it to the appropriate role's set below
-2. Use it in a route: `@router.get("/", dependencies=[Depends(require_permissions("plot:read:own"))])`
+2. Use it in a route:
+   `@router.get("/", dependencies=[Depends(require_permissions("plot:read:own"))])`
 
 Permissions are version-controlled in code (not in database) so changes go
 through code review. This preserves auditability — every permission change

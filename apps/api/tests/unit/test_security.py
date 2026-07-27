@@ -6,6 +6,7 @@ These tests don't require a database — they test pure functions.
 from __future__ import annotations
 
 import pytest
+
 from krishisetu.core.exceptions import AuthenticationError
 from krishisetu.core.security import (
     create_access_token,
@@ -17,7 +18,6 @@ from krishisetu.core.security import (
     validate_aadhaar,
     verify_password,
 )
-
 
 # ---------------------------------------------------------------------------
 # Password hashing

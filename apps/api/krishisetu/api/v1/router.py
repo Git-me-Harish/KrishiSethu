@@ -8,21 +8,72 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from krishisetu.api.v1 import health, integrations
-from krishisetu.domains.identity.routes import (
-    admin_router as identity_admin_router,
-    me_router as identity_me_router,
-    router as identity_router,
+from krishisetu.domains.audit.routes import router as audit_router
+from krishisetu.domains.consent.routes import (
+    admin_router as consent_admin_router,
 )
-from krishisetu.domains.farmer.routes import (
-    crops_router as farmer_crops_router,
-    crop_cycles_router as farmer_crop_cycles_router,
-    officer_router as farmer_officer_router,
-    plots_router as farmer_plots_router,
+from krishisetu.domains.consent.routes import (
+    router as consent_router,
 )
 from krishisetu.domains.disease.routes import (
     disease_router,
     diseases_router,
     officer_disease_router,
+)
+from krishisetu.domains.farmer.routes import (
+    crop_cycles_router as farmer_crop_cycles_router,
+)
+from krishisetu.domains.farmer.routes import (
+    crops_router as farmer_crops_router,
+)
+from krishisetu.domains.farmer.routes import (
+    officer_router as farmer_officer_router,
+)
+from krishisetu.domains.farmer.routes import (
+    plots_router as farmer_plots_router,
+)
+from krishisetu.domains.identity.routes import (
+    admin_router as identity_admin_router,
+)
+from krishisetu.domains.identity.routes import (
+    me_router as identity_me_router,
+)
+from krishisetu.domains.identity.routes import (
+    router as identity_router,
+)
+from krishisetu.domains.insurance.routes import (
+    claims_router as insurance_claims_router,
+)
+from krishisetu.domains.insurance.routes import (
+    insurer_router as insurance_insurer_router,
+)
+from krishisetu.domains.insurance.routes import (
+    policies_router as insurance_policies_router,
+)
+from krishisetu.domains.insurance.routes import (
+    products_router as insurance_products_router,
+)
+from krishisetu.domains.marketplace.routes import (
+    marketplace_router,
+    supplier_router,
+)
+from krishisetu.domains.ndvi.routes import (
+    ndvi_anomaly_router,
+    officer_ndvi_router,
+    plot_ndvi_router,
+)
+from krishisetu.domains.payment.routes import router as payment_router
+from krishisetu.domains.privacy.routes import (
+    officer_router as privacy_officer_router,
+)
+from krishisetu.domains.privacy.routes import (
+    router as privacy_router,
+)
+from krishisetu.domains.schemes.routes import (
+    officer_router as schemes_officer_router,
+)
+from krishisetu.domains.schemes.routes import (
+    schemes_router,
 )
 from krishisetu.domains.soil_weather.routes import (
     admin_weather_router,
@@ -30,36 +81,7 @@ from krishisetu.domains.soil_weather.routes import (
     plot_soil_router,
     plot_weather_router,
 )
-from krishisetu.domains.ndvi.routes import (
-    ndvi_anomaly_router,
-    officer_ndvi_router,
-    plot_ndvi_router,
-)
-from krishisetu.domains.insurance.routes import (
-    claims_router as insurance_claims_router,
-    insurer_router as insurance_insurer_router,
-    policies_router as insurance_policies_router,
-    products_router as insurance_products_router,
-)
-from krishisetu.domains.marketplace.routes import (
-    marketplace_router,
-    supplier_router,
-)
-from krishisetu.domains.schemes.routes import (
-    officer_router as schemes_officer_router,
-    schemes_router,
-)
 from krishisetu.domains.voice.routes import router as voice_router
-from krishisetu.domains.payment.routes import router as payment_router
-from krishisetu.domains.consent.routes import (
-    admin_router as consent_admin_router,
-    router as consent_router,
-)
-from krishisetu.domains.privacy.routes import (
-    officer_router as privacy_officer_router,
-    router as privacy_router,
-)
-from krishisetu.domains.audit.routes import router as audit_router
 
 api_router = APIRouter()
 

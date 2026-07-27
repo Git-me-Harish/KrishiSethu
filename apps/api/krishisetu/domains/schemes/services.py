@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -16,6 +16,8 @@ from krishisetu.core.exceptions import (
 )
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.farmer import repository as farmer_repo
+from krishisetu.domains.farmer.officer_scope import resolve_officer_jurisdiction
+from krishisetu.domains.identity.models import User
 from krishisetu.domains.schemes import repository as repo
 from krishisetu.domains.schemes.eligibility import evaluate_eligibility
 from krishisetu.domains.schemes.models import ApplicationStatus
@@ -208,7 +210,8 @@ async def submit_application(
 
     if app_dict["status"] != ApplicationStatus.DRAFT.value:
         raise ValidationError(
-            f"Application is in '{app_dict['status']}' state. Only draft applications can be submitted."
+            f"Application is in '{app_dict['status']}' state. "
+            "Only draft applications can be submitted."
         )
 
     # Merge additional data
@@ -303,14 +306,22 @@ async def withdraw_application(
 
 async def officer_list_applications(
     db: AsyncSession,
+    officer: User,
     *,
     status: ApplicationStatus | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> SchemeApplicationListResponse:
-    """List applications for officer review."""
+    """List applications for officer review, scoped to the officer's district."""
+    jurisdiction = resolve_officer_jurisdiction(officer)
+
     apps, total = await repo.list_applications_for_review(
-        db, status=status, page=page, page_size=page_size
+        db,
+        district=jurisdiction.district if jurisdiction else None,
+        state=jurisdiction.state if jurisdiction else None,
+        status=status,
+        page=page,
+        page_size=page_size,
     )
     return SchemeApplicationListResponse(
         applications=[SchemeApplicationResponse(**a) for a in apps],
@@ -321,13 +332,25 @@ async def officer_list_applications(
 async def officer_review_application(
     db: AsyncSession,
     app_id: UUID,
-    officer_id: UUID,
+    officer: User,
     payload: OfficerReviewRequest,
 ) -> SchemeApplicationResponse:
-    """Officer reviews a scheme application."""
+    """Officer reviews a scheme application from their own district."""
+    officer_id = officer.id
     app_dict = await repo.get_application_by_id(db, app_id)
     if not app_dict:
         raise NotFoundError("SchemeApplication", str(app_id))
+
+    jurisdiction = resolve_officer_jurisdiction(officer)
+    if jurisdiction is not None:
+        in_district = await farmer_repo.farmer_has_plot_in_district(
+            db,
+            app_dict["farmer_id"],
+            jurisdiction.district,
+            jurisdiction.state,
+        )
+        if not in_district:
+            raise NotFoundError("SchemeApplication", str(app_id))
 
     if app_dict["status"] not in (
         ApplicationStatus.SUBMITTED.value,
@@ -399,9 +422,8 @@ async def _compile_farmer_data(db: AsyncSession, farmer_id: UUID) -> dict[str, A
     - farmer.crop_cycles (has_active_crop_cycle)
     - insurance.policies (bank_account_number)
     """
+    from krishisetu.domains.farmer.repository import check_active_crop_cycle, list_plots_by_farmer
     from krishisetu.domains.identity import repository as identity_repo
-    from krishisetu.domains.farmer.repository import list_plots_by_farmer
-    from krishisetu.domains.farmer.repository import check_active_crop_cycle
 
     user = await identity_repo.get_user_by_id(db, farmer_id)
 
@@ -438,7 +460,6 @@ async def _compile_farmer_data(db: AsyncSession, farmer_id: UUID) -> dict[str, A
         data["irrigation_source"] = list(irrigation_sources) if irrigation_sources else []
 
         # Check for active crop cycle
-        from uuid import UUID as UUIDType
         for p in plots:
             plot_id = p.get("id")
             if plot_id:
@@ -458,6 +479,6 @@ async def _compile_farmer_data(db: AsyncSession, farmer_id: UUID) -> dict[str, A
 
 def _generate_application_number() -> str:
     """Generate unique application number: KS-SCH-YYYYMMDD-8hex"""
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    today = datetime.now(UTC).strftime("%Y%m%d")
     short_uuid = uuid.uuid4().hex[:8]
     return f"KS-SCH-{today}-{short_uuid}"

@@ -22,6 +22,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from typing import ClassVar
 from uuid import UUID
 
 from sqlalchemy import (
@@ -35,11 +36,11 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from krishisetu.core.database import Base
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -125,7 +126,7 @@ class ProductCategory(Base):
     """
 
     __tablename__ = "product_categories"
-    __table_args__ = {"schema": "commerce"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "commerce"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -160,8 +161,8 @@ class ProductCategory(Base):
     )
 
     # Relationships
-    products: Mapped[list["Product"]] = relationship("Product", back_populates="category")
-    children: Mapped[list["ProductCategory"]] = relationship(
+    products: Mapped[list[Product]] = relationship("Product", back_populates="category")
+    children: Mapped[list[ProductCategory]] = relationship(
         "ProductCategory", backref="parent", remote_side="ProductCategory.id"
     )
 
@@ -183,7 +184,7 @@ class Supplier(Base):
     """
 
     __tablename__ = "suppliers"
-    __table_args__ = {"schema": "commerce"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "commerce"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -256,7 +257,7 @@ class Supplier(Base):
     )
 
     # Relationships
-    products: Mapped[list["Product"]] = relationship(
+    products: Mapped[list[Product]] = relationship(
         "Product", back_populates="supplier", cascade="all, delete-orphan"
     )
 
@@ -285,7 +286,7 @@ class Product(Base):
     """
 
     __tablename__ = "products"
-    __table_args__ = {"schema": "commerce"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "commerce"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -397,7 +398,7 @@ class Product(Base):
     # Relationships
     supplier: Mapped[Supplier] = relationship("Supplier", back_populates="products")
     category: Mapped[ProductCategory] = relationship("ProductCategory", back_populates="products")
-    order_items: Mapped[list["OrderItem"]] = relationship(
+    order_items: Mapped[list[OrderItem]] = relationship(
         "OrderItem", back_populates="product"
     )
 
@@ -518,10 +519,10 @@ class Order(Base):
     )
 
     # Relationships
-    items: Mapped[list["OrderItem"]] = relationship(
+    items: Mapped[list[OrderItem]] = relationship(
         "OrderItem", back_populates="order", cascade="all, delete-orphan"
     )
-    shipments: Mapped[list["Shipment"]] = relationship(
+    shipments: Mapped[list[Shipment]] = relationship(
         "Shipment", back_populates="order", cascade="all, delete-orphan"
     )
 
@@ -542,7 +543,7 @@ class OrderItem(Base):
     """
 
     __tablename__ = "order_items"
-    __table_args__ = {"schema": "commerce"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "commerce"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -610,7 +611,7 @@ class Shipment(Base):
     """
 
     __tablename__ = "shipments"
-    __table_args__ = {"schema": "commerce"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "commerce"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

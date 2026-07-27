@@ -13,7 +13,7 @@ audit_logs table (for compliance audit trail).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import Request
@@ -71,7 +71,7 @@ async def grant_consent(
         existing = await _get_active_consent(db, user_id, purpose)
         if existing is not None:
             existing.status = ConsentStatus.WITHDRAWN.value
-            existing.withdrawn_at = datetime.now(timezone.utc)
+            existing.withdrawn_at = datetime.now(UTC)
             existing.withdrawn_by = actor
             existing.withdrawal_reason = "superseded by new grant"
             existing.withdrawn_from_ip = ip
@@ -139,7 +139,7 @@ async def withdraw_consent(
             # No active consent to withdraw — skip silently (idempotent)
             continue
         active.status = ConsentStatus.WITHDRAWN.value
-        active.withdrawn_at = datetime.now(timezone.utc)
+        active.withdrawn_at = datetime.now(UTC)
         active.withdrawn_by = actor
         active.withdrawal_reason = payload.reason
         active.withdrawn_from_ip = ip
@@ -239,10 +239,10 @@ async def _get_active_consent(
 
 
 __all__ = [
-    "grant_consent",
-    "withdraw_consent",
-    "get_consent_status",
-    "list_consent_history",
-    "has_active_consent",
     "CURRENT_NOTICE_VERSION",
+    "get_consent_status",
+    "grant_consent",
+    "has_active_consent",
+    "list_consent_history",
+    "withdraw_consent",
 ]

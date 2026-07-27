@@ -21,6 +21,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from typing import ClassVar
 from uuid import UUID
 
 from sqlalchemy import (
@@ -33,11 +34,11 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from krishisetu.core.database import Base
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -82,7 +83,7 @@ class NDVIObservation(Base):
     itself is stored in S3 (raster_url) and served via pre-signed URLs.
 
     Partitioned by month (RANGE on observed_at) for efficient time-series
-    queries. With 1M plots × weekly observations × 2 years = ~100M rows,
+    queries. With 1M plots x weekly observations x 2 years = ~100M rows,
     partitioning is essential.
     """
 
@@ -228,7 +229,7 @@ class NDVIAnomalyAlert(Base):
     """
 
     __tablename__ = "ndvi_anomaly_alerts"
-    __table_args__ = {"schema": "intelligence"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "intelligence"}
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

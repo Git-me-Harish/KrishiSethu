@@ -23,16 +23,16 @@ Create Date: 2026-07-19
 """
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "0004"
-down_revision: Union[str, None] = "0003"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "0003"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 # Crop data — sourced from ICAR / Ministry of Agriculture
@@ -130,7 +130,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Delete all seeded crops (preserves any user-added ones if we had a UI for that)
-    op.execute("DELETE FROM farmer.crops WHERE slug IN :slugs")
     # Note: parameterized DDL doesn't work in Alembic; use explicit list
     slugs = ", ".join(f"'{c[0]}'" for c in CROPS)
-    op.execute(f"DELETE FROM farmer.crops WHERE slug IN ({slugs})")
+    # slugs is built from the static CROPS list above, not user input
+    op.execute(f"DELETE FROM farmer.crops WHERE slug IN ({slugs})")  # noqa: S608

@@ -30,7 +30,7 @@ def _build_test_app() -> FastAPI:
     from fastapi.responses import JSONResponse
 
     @app.exception_handler(Exception)
-    async def handler(request, exc):  # noqa: ARG001
+    async def handler(request, exc):
         return JSONResponse(status_code=500, content={"error": "test"})
 
     return app

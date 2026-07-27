@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,9 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from krishisetu.core.exceptions import NotFoundError, ValidationError
 from krishisetu.core.logging import get_logger
 from krishisetu.domains.marketplace import repository as repo
-from krishisetu.domains.marketplace.models import OrderStatus, PaymentStatus
+from krishisetu.domains.marketplace.models import OrderStatus
 from krishisetu.domains.marketplace.schemas import (
-    CartItem,
     MarketplaceStatsResponse,
     OrderCreateRequest,
     OrderListResponse,
@@ -136,7 +134,9 @@ async def create_product(
     )
 
     product_dict = await repo.get_product_by_id(db, product.id)
-    return ProductResponse(**product_dict) if product_dict else ProductResponse.model_validate(product)
+    if product_dict:
+        return ProductResponse(**product_dict)
+    return ProductResponse.model_validate(product)
 
 
 # ---------------------------------------------------------------------------
@@ -372,8 +372,7 @@ async def supplier_update_order_status(
 
     # Verify this supplier has items in this order
     has_items = any(
-        item.get("fulfillment_status") == "pending"
-        or True  # Check if any item belongs to this supplier
+        item.get("supplier_id") == supplier.id
         for item in order_dict.get("items", [])
     )
     if not has_items:
@@ -428,7 +427,7 @@ async def supplier_update_order_status(
             supplier_id=supplier.id,
             tracking_number=payload.tracking_number,
             carrier=payload.carrier,
-            shipped_at=datetime.now(timezone.utc),
+            shipped_at=datetime.now(UTC),
             status="shipped",
         )
         db.add(shipment)
@@ -463,6 +462,6 @@ async def get_marketplace_stats(
 
 def _generate_order_number() -> str:
     """Generate unique order number: KS-ORD-YYYYMMDD-8hex"""
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    today = datetime.now(UTC).strftime("%Y%m%d")
     short_uuid = uuid.uuid4().hex[:8]
     return f"KS-ORD-{today}-{short_uuid}"

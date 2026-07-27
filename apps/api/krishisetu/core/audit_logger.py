@@ -45,8 +45,7 @@ Usage:
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
@@ -71,8 +70,8 @@ class AuditAction(str, Enum):
     LOGIN_SUCCESS = "login.success"
     LOGIN_FAILED = "login.failed"
     LOGOUT = "logout"
-    TOKEN_REFRESHED = "token.refreshed"
-    PASSWORD_CHANGED = "password.changed"
+    TOKEN_REFRESHED = "token.refreshed"  # noqa: S105 -- audit action name, not a credential
+    PASSWORD_CHANGED = "password.changed"  # noqa: S105 -- audit action name, not a credential
     OTP_SENT = "otp.sent"
     OTP_VERIFIED = "otp.verified"
     ACCOUNT_LOCKED = "account.locked"
@@ -249,7 +248,7 @@ async def audit_log(
         "ip_address": ip_address,
         "user_agent": user_agent,
         "request_id": request_id,
-        "occurred_at": datetime.now(timezone.utc),
+        "occurred_at": datetime.now(UTC),
     }
 
     try:
@@ -271,8 +270,8 @@ async def audit_log(
         # subsequent operations in the same request.
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as rollback_exc:
+            logger.debug("audit.rollback_failed", error=str(rollback_exc))
 
     return audit_id
 

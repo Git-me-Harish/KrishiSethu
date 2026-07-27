@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, Header, Request, status
+from fastapi import Depends, Header, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,8 +33,8 @@ from krishisetu.core.database import get_db
 from krishisetu.core.exceptions import AuthenticationError, AuthorizationError
 from krishisetu.core.logging import get_logger
 from krishisetu.core.security import decode_token
-from krishisetu.domains.identity.models import User, UserRole
 from krishisetu.domains.identity import repository as repo
+from krishisetu.domains.identity.models import User, UserRole
 from krishisetu.domains.identity.permissions import has_all_permissions
 
 logger = get_logger(__name__)

@@ -15,14 +15,12 @@ Naming convention:
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
 from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from krishisetu.domains.identity.models import UserRole
-
 
 # ---------------------------------------------------------------------------
 # Auth request schemas
@@ -111,12 +109,12 @@ class TokenResponse(BaseModel):
 
     access_token: str = Field(..., description="Short-lived JWT access token (30 min)")
     refresh_token: str = Field(..., description="Long-lived JWT refresh token (30 days)")
-    token_type: Literal["bearer"] = "bearer"
+    token_type: Literal["bearer"] = "bearer"  # noqa: S105 -- OAuth token type, not a credential
     expires_in: int = Field(
         ...,
         description="Access token expiration in seconds (from now)",
     )
-    user: "UserPublic"
+    user: UserPublic
 
 
 class UserPublic(BaseModel):

@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.core.database import get_db
@@ -283,4 +283,4 @@ async def officer_update_grievance(
     return GrievanceResponse.model_validate(updated)
 
 
-__all__ = ["router", "officer_router"]
+__all__ = ["officer_router", "router"]

@@ -1,16 +1,17 @@
-"""Unit tests for soil_weather domain — schemas, ISRIC parsing, IMD synthetic data, fertilizer recommendations.
+"""Unit tests for soil_weather domain.
+
+Covers schemas, ISRIC parsing, IMD synthetic data, and fertilizer recommendations.
 
 These tests don't require a database — they test pure functions.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
-
 
 # ---------------------------------------------------------------------------
 # Schema tests
@@ -170,8 +171,9 @@ class TestIMDSyntheticData:
 
     def test_northern_district_cooler_in_winter(self):
         """In January, Delhi (28°N) should be cooler than Chennai (13°N)."""
-        from krishisetu.integrations.imd import IMDClient, MONTHLY_TEMPS
         from unittest.mock import patch
+
+        from krishisetu.integrations.imd import IMDClient
 
         client = IMDClient()
 
@@ -179,7 +181,7 @@ class TestIMDSyntheticData:
         class FakeDatetime:
             @classmethod
             def now(cls, tz=None):
-                return datetime(2026, 1, 15, 12, 0, 0, tzinfo=tz or timezone.utc)
+                return datetime(2026, 1, 15, 12, 0, 0, tzinfo=tz or UTC)
 
         with patch("krishisetu.integrations.imd.datetime", FakeDatetime):
             delhi = client._generate_current_synthetic("Delhi", "Delhi", 28.61, 77.21)
@@ -450,48 +452,52 @@ class TestWeatherAlertThresholds:
     """Test the weather alert threshold logic."""
 
     def test_heat_wave_severity_critical(self):
+        from decimal import Decimal
+
         from krishisetu.domains.soil_weather.models import WeatherAlertSeverity, WeatherAlertType
         from krishisetu.domains.soil_weather.services import (
             ALERT_THRESHOLDS,
             _get_severity_by_threshold,
         )
-        from decimal import Decimal
 
         thresholds = ALERT_THRESHOLDS[WeatherAlertType.HEAT_WAVE]["severity_by_temp"]
         severity = _get_severity_by_threshold(Decimal("46"), thresholds)
         assert severity == WeatherAlertSeverity.CRITICAL
 
     def test_heat_wave_severity_severe(self):
+        from decimal import Decimal
+
         from krishisetu.domains.soil_weather.models import WeatherAlertSeverity, WeatherAlertType
         from krishisetu.domains.soil_weather.services import (
             ALERT_THRESHOLDS,
             _get_severity_by_threshold,
         )
-        from decimal import Decimal
 
         thresholds = ALERT_THRESHOLDS[WeatherAlertType.HEAT_WAVE]["severity_by_temp"]
         severity = _get_severity_by_threshold(Decimal("44"), thresholds)
         assert severity == WeatherAlertSeverity.SEVERE
 
     def test_heat_wave_severity_warning(self):
+        from decimal import Decimal
+
         from krishisetu.domains.soil_weather.models import WeatherAlertSeverity, WeatherAlertType
         from krishisetu.domains.soil_weather.services import (
             ALERT_THRESHOLDS,
             _get_severity_by_threshold,
         )
-        from decimal import Decimal
 
         thresholds = ALERT_THRESHOLDS[WeatherAlertType.HEAT_WAVE]["severity_by_temp"]
         severity = _get_severity_by_threshold(Decimal("41"), thresholds)
         assert severity == WeatherAlertSeverity.WARNING
 
     def test_frost_severity_critical_below_zero(self):
+        from decimal import Decimal
+
         from krishisetu.domains.soil_weather.models import WeatherAlertSeverity, WeatherAlertType
         from krishisetu.domains.soil_weather.services import (
             ALERT_THRESHOLDS,
             _get_severity_by_threshold,
         )
-        from decimal import Decimal
 
         thresholds = ALERT_THRESHOLDS[WeatherAlertType.FROST]["severity_by_temp"]
         # Frost is reverse — lower temp = higher severity
@@ -499,12 +505,13 @@ class TestWeatherAlertThresholds:
         assert severity == WeatherAlertSeverity.CRITICAL
 
     def test_heavy_rain_severity_severe(self):
+        from decimal import Decimal
+
         from krishisetu.domains.soil_weather.models import WeatherAlertSeverity, WeatherAlertType
         from krishisetu.domains.soil_weather.services import (
             ALERT_THRESHOLDS,
             _get_severity_by_threshold,
         )
-        from decimal import Decimal
 
         thresholds = ALERT_THRESHOLDS[WeatherAlertType.HEAVY_RAIN]["severity_by_mm"]
         severity = _get_severity_by_threshold(Decimal("70"), thresholds)
@@ -530,7 +537,7 @@ class TestDistrictCentroids:
         from krishisetu.domains.soil_weather.services import get_district_centroid
 
         # Unknown district but known state
-        lat, lon = get_district_centroid("Unknown District", "Maharashtra")
+        lat, _lon = get_district_centroid("Unknown District", "Maharashtra")
         # Should return Maharashtra state centroid
         assert 18.0 < lat < 20.0
 

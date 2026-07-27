@@ -5,11 +5,10 @@ These tests don't require a database — they test pure functions.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # NDVI computation tests
@@ -29,7 +28,7 @@ class TestNDVIComputation:
             scl=[[scl_val] * width for _ in range(height)],
             width=width,
             height=height,
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             cloud_cover_pct=0.0,
         )
 
@@ -62,7 +61,7 @@ class TestNDVIComputation:
             scl=[[8] * 10 for _ in range(10)],  # All cloud
             width=10,
             height=10,
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             cloud_cover_pct=100.0,
         )
         stats = compute_ndvi_stats(band_data)
@@ -89,7 +88,7 @@ class TestNDVIComputation:
             scl=scl,
             width=4,
             height=4,
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             cloud_cover_pct=50.0,
         )
         stats = compute_ndvi_stats(band_data)
@@ -186,7 +185,7 @@ class TestNDVIAnomalyDetection:
         """NDVI improvement (negative drop) is not an anomaly."""
         from krishisetu.domains.ndvi.computation import detect_ndvi_anomaly
 
-        anomaly_type, drop = detect_ndvi_anomaly(0.40, 0.60)  # Improvement of 0.20
+        anomaly_type, _drop = detect_ndvi_anomaly(0.40, 0.60)  # Improvement of 0.20
         assert anomaly_type is None
 
     def test_low_vegetation_detected(self):
@@ -196,7 +195,7 @@ class TestNDVIAnomalyDetection:
         # Previous was 0.4 (moderate), current is 0.15 (bare)
         # Drop = 0.25, which is > 0.15 → would be significant_drop
         # But the test is for the low_vegetation case
-        anomaly_type, drop = detect_ndvi_anomaly(0.40, 0.15)
+        anomaly_type, _drop = detect_ndvi_anomaly(0.40, 0.15)
         # Since drop > 0.15, it's classified as significant_drop first
         assert anomaly_type == "significant_drop"
 
@@ -235,7 +234,7 @@ class TestNDVIColorMapping:
         """Bare soil NDVI (<0.1) returns red/brown color."""
         from krishisetu.domains.ndvi.computation import ndvi_to_color
 
-        r, g, b = ndvi_to_color(0.05)
+        r, g, _b = ndvi_to_color(0.05)
         assert r > g  # Red dominant
 
     def test_water_ndvi_returns_blue(self):
@@ -302,8 +301,9 @@ class TestNDVISchemas:
         assert ack.resolution_notes is None
 
     def test_anomaly_acknowledge_notes_max_length(self):
-        from krishisetu.domains.ndvi.schemas import NDVIAnomalyAcknowledge
         from pydantic import ValidationError
+
+        from krishisetu.domains.ndvi.schemas import NDVIAnomalyAcknowledge
 
         with pytest.raises(ValidationError):
             NDVIAnomalyAcknowledge(resolution_notes="x" * 2001)
