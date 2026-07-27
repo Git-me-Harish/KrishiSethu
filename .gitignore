@@ -17,8 +17,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -110,4 +110,4 @@ $RECYCLE.BIN/
 secrets/
 
 # Keys
-krishisethu-8e872-firebase-adminsdk-fbsvc-2fa055f29d.json
+krishisethu-8e872-firebase-adminsdk-fbsvc-2fa055f29d.jsonapps/web/tsconfig.tsbuildinfo

@@ -30,16 +30,17 @@ interface AuthState {
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   isAuthenticated: false,
-  isLoading: false,
+  // Start in loading state so route guards don't redirect before hydrate() runs
+  isLoading: true,
   error: null,
 
   hydrate: () => {
     const user = tokenStorage.getUser();
     if (user && tokenStorage.hasTokens()) {
-      set({ user, isAuthenticated: true });
+      set({ user, isAuthenticated: true, isLoading: false });
     } else {
       tokenStorage.clear();
-      set({ user: null, isAuthenticated: false });
+      set({ user: null, isAuthenticated: false, isLoading: false });
     }
   },
 
