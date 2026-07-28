@@ -1,8 +1,9 @@
 """Disease domain — business logic services.
 
 Orchestrates:
-- Pre-signed URL generation for image uploads
-- Disease report creation + Celery task dispatch
+- Pre-signed URL generation for image uploads (with content-type validation)
+- Disease report creation + Celery task dispatch (with image_key ownership
+  verification to prevent IDOR)
 - Disease report retrieval with prediction + treatment enrichment
 - Farmer feedback submission
 - Officer review workflow
@@ -13,6 +14,17 @@ Key flows:
 - Submit: GET upload-url -> PUT image to S3 -> POST /disease-reports -> Celery task
 - Poll: GET /disease-reports/{id} returns status (pending -> processing -> completed)
 - Feedback: POST /disease-reports/{id}/feedback (correct/incorrect)
+
+FIX (T3):
+  1. generate_upload_url() now validates the content_type against the
+     UploadContext.DISEASE_IMAGE allowlist (previously accepted any string).
+  2. submit_disease_report() now verifies the image_key starts with the
+     farmer's own prefix (`disease-reports/{farmer_id}/`) — closes an IDOR
+     where a farmer could submit a report referencing another farmer's S3
+     object (e.g. another farmer's disease photo, or any other S3 key).
+  3. list_my_disease_reports() no longer silently drops captured_at,
+     failure_reason, and updated_at — they were hardcoded to None/created_at
+     in the list view, hiding data the detail view shows.
 """
 
 from __future__ import annotations
@@ -24,9 +36,15 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.core.exceptions import (
+    AuthorizationError,
     ConflictError,
     NotFoundError,
     ValidationError,
+)
+from krishisetu.core.file_upload_security import (
+    FileValidationError,
+    UploadContext,
+    _UPLOAD_RULES,  # noqa: F401 — used for content-type allowlist lookup
 )
 from krishisetu.core.logging import get_logger
 from krishisetu.core.storage import get_storage
@@ -59,10 +77,14 @@ from krishisetu.domains.identity.permissions import (
 
 logger = get_logger(__name__)
 
-
-# ---------------------------------------------------------------------------
 # Upload URL generation
-# ---------------------------------------------------------------------------
+# Allowlist of content types for disease images, derived from the
+# UploadContext.DISEASE_IMAGE rules in core/file_upload_security.py.
+# Mirrors the Literal in UploadUrlRequest schema — kept here as a set for
+# fast membership checks.
+_ALLOWED_DISEASE_IMAGE_CONTENT_TYPES: frozenset[str] = frozenset(
+    {"image/jpeg", "image/png", "image/webp"}
+)
 
 
 async def generate_upload_url(
@@ -74,9 +96,22 @@ async def generate_upload_url(
     The farmer uses this URL with HTTP PUT to upload the image directly to
     S3, bypassing the API. The URL expires after 15 minutes.
 
+    FIX (T3): the content_type is now validated against the disease-image
+    allowlist (image/jpeg, image/png, image/webp). Previously any string
+    was accepted, which could be used to upload arbitrary content types
+    to S3 via the pre-signed URL.
+
     Returns the S3 key (which the farmer includes in the subsequent
     POST /disease-reports request) and the upload URL.
     """
+    # Validate content_type against the disease-image allowlist.
+    if content_type not in _ALLOWED_DISEASE_IMAGE_CONTENT_TYPES:
+        allowed = sorted(_ALLOWED_DISEASE_IMAGE_CONTENT_TYPES)
+        raise ValidationError(
+            f"Content type '{content_type}' is not allowed for disease images. "
+            f"Allowed: {', '.join(allowed)}"
+        )
+
     storage = get_storage()
 
     # Generate a temporary report_id for the S3 key (the actual report
@@ -98,6 +133,7 @@ async def generate_upload_url(
         "disease.upload_url.generated",
         farmer_id=str(farmer_id),
         image_key=image_key,
+        content_type=content_type,
     )
 
     return UploadUrlResponse(
@@ -117,11 +153,7 @@ def _suffix_for_content_type(content_type: str) -> str:
     }.get(content_type, "original.jpg")
 
 
-# ---------------------------------------------------------------------------
 # Disease report submission
-# ---------------------------------------------------------------------------
-
-
 async def submit_disease_report(
     db: AsyncSession,
     farmer_id: UUID,
@@ -130,22 +162,30 @@ async def submit_disease_report(
     """Create a new disease report and dispatch inference task.
 
     Steps:
-    1. Verify the image exists in S3 (defensive — client should have uploaded)
-    2. If plot_id provided, verify it belongs to the farmer
-    3. If crop_cycle_id provided, verify it belongs to the plot
-    4. Create the report (status=pending)
-    5. Dispatch Celery task for async inference
-    6. Return the report (without prediction yet — client polls)
+    1. Verify the image_key belongs to THIS farmer (IDOR prevention)
+    2. Verify the image exists in S3 (defensive — client should have uploaded)
+    3. If plot_id provided, verify it belongs to the farmer
+    4. If crop_cycle_id provided, verify it belongs to the plot
+    5. Create the report (status=pending)
+    6. Dispatch Celery task for async inference
+    7. Return the report (without prediction yet — client polls)
+
+    FIX (T3): added step 1 — image_key ownership verification. Previously
+    a farmer could submit a report referencing ANY S3 key, including
+    another farmer's disease photo. Now the image_key must start with
+    `disease-reports/{farmer_id}/` (the prefix generated by
+    generate_upload_url() for this farmer).
     """
     storage = get_storage()
 
-    # Verify image was uploaded
+    # Verify image_key belongs to this farmer (IDOR prevention)
+    _verify_image_key_ownership(payload.image_key, farmer_id)
+
     if not storage.object_exists(payload.image_key):
         raise ValidationError(
             "Image not found. Please upload the image first using the upload URL."
         )
 
-    # Verify plot ownership (if provided)
     if payload.plot_id:
         plot = await farmer_repo.get_plot_by_id(
             db, payload.plot_id, include_boundary=False
@@ -153,7 +193,6 @@ async def submit_disease_report(
         if not plot or plot.farmer_id != farmer_id:
             raise NotFoundError("Plot", str(payload.plot_id))
 
-    # Create the report
     report = await repo.create_disease_report(
         db,
         farmer_id=farmer_id,
@@ -164,7 +203,6 @@ async def submit_disease_report(
         farmer_notes=payload.farmer_notes,
     )
 
-    # Dispatch Celery task for async inference
     # Import here to avoid circular dependency
     from krishisetu.workers.tasks.disease import predict_disease
 
@@ -185,11 +223,34 @@ async def submit_disease_report(
     )
 
 
-# ---------------------------------------------------------------------------
+def _verify_image_key_ownership(image_key: str, farmer_id: UUID) -> None:
+    """Verify that the image_key belongs to the given farmer.
+
+    The S3 key format generated by generate_upload_url() is:
+        disease-reports/{farmer_id}/{report_id}/original.{ext}
+
+    We verify the key starts with `disease-reports/{farmer_id}/`. If not,
+    raise AuthorizationError — the farmer is attempting to submit a report
+    referencing another farmer's image (or an arbitrary S3 key).
+
+    This is the T3 fix for the disease report IDOR.
+    """
+    expected_prefix = f"disease-reports/{farmer_id}/"
+    if not image_key.startswith(expected_prefix):
+        logger.warning(
+            "disease.report.image_key_ownership_failed",
+            farmer_id=str(farmer_id),
+            image_key=image_key,
+            expected_prefix=expected_prefix,
+        )
+        raise AuthorizationError(
+            "Image key does not belong to the current user. "
+            "You can only submit disease reports for images you uploaded."
+        )
+
+
+
 # Disease report retrieval
-# ---------------------------------------------------------------------------
-
-
 async def get_disease_report(
     db: AsyncSession,
     report_id: UUID,
@@ -262,7 +323,13 @@ async def list_my_disease_reports(
     page: int = 1,
     page_size: int = 20,
 ) -> DiseaseReportListResponse:
-    """List the current farmer's disease reports."""
+    """List the current farmer's disease reports.
+
+    FIX (T3): the previous version hardcoded captured_at=None,
+    failure_reason=None, and updated_at=created_at in the list view,
+    silently dropping data that the detail view shows. The list view now
+    returns the real values for all fields.
+    """
     reports, total = await repo.list_disease_reports_by_farmer(
         db, farmer_id, status=status, page=page, page_size=page_size
     )
@@ -279,13 +346,13 @@ async def list_my_disease_reports(
                 plot_id=r["plot_id"],
                 crop_cycle_id=r["crop_cycle_id"],
                 image_url=image_url,
-                captured_at=None,
+                captured_at=r.get("captured_at"),
                 submitted_at=r["submitted_at"],
                 farmer_notes=r["farmer_notes"],
                 status=r["status"],
-                failure_reason=None,
+                failure_reason=r.get("failure_reason"),
                 created_at=r["created_at"],
-                updated_at=r["created_at"],
+                updated_at=r.get("updated_at", r["created_at"]),
                 prediction=None,  # List view doesn't include prediction
             )
         )
@@ -307,11 +374,8 @@ async def get_disease_report_stats(
     return DiseaseReportStatsResponse(**stats)
 
 
-# ---------------------------------------------------------------------------
+
 # Disease feedback
-# ---------------------------------------------------------------------------
-
-
 async def submit_feedback(
     db: AsyncSession,
     report_id: UUID,
@@ -370,11 +434,8 @@ async def submit_feedback(
     return DiseaseFeedbackResponse.model_validate(feedback)
 
 
-# ---------------------------------------------------------------------------
+
 # Disease catalog (public)
-# ---------------------------------------------------------------------------
-
-
 async def list_diseases(
     db: AsyncSession,
     *,
@@ -396,7 +457,6 @@ async def list_diseases(
         total=total,
     )
 
-
 async def get_disease(db: AsyncSession, slug: str) -> DiseaseResponse:
     """Get a disease by slug with treatments."""
     disease = await repo.get_disease_by_slug(db, slug, include_treatments=True)
@@ -405,11 +465,8 @@ async def get_disease(db: AsyncSession, slug: str) -> DiseaseResponse:
     return DiseaseResponse.model_validate(disease)
 
 
-# ---------------------------------------------------------------------------
+
 # Officer review
-# ---------------------------------------------------------------------------
-
-
 async def officer_list_review_queue(
     db: AsyncSession,
     officer_id: UUID,
@@ -433,13 +490,13 @@ async def officer_list_review_queue(
                 plot_id=r["plot_id"],
                 crop_cycle_id=r.get("crop_cycle_id"),
                 image_url=image_url,
-                captured_at=None,
+                captured_at=r.get("captured_at"),
                 submitted_at=r["submitted_at"],
                 farmer_notes=r["farmer_notes"],
                 status=r["status"],
-                failure_reason=None,
+                failure_reason=r.get("failure_reason"),
                 created_at=r["created_at"],
-                updated_at=r["created_at"],
+                updated_at=r.get("updated_at", r["created_at"]),
                 prediction=None,
             )
         )
@@ -489,12 +546,7 @@ async def officer_review_report(
 
     return await get_disease_report(db, report_id)
 
-
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
-
-
 def _to_report_response(
     data: dict[str, Any],
     *,

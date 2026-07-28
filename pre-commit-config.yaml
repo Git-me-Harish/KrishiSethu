@@ -1,0 +1,63 @@
+# Pre-commit hooks for KrishiSetu
+#
+# Setup (one-time):
+#   pip install pre-commit detect-secrets
+#   pre-commit install
+#   detect-secrets scan > .secrets.baseline    # generate baseline (one-time)
+#   pre-commit run --all-files                 # run once on the whole repo
+#
+# After this, every `git commit` will run:
+#   1. gitleaks        — scans staged files for known secret patterns
+#   2. detect-secrets  — backup scanner with a project baseline
+#   3. hygiene hooks   — EOF fixer, trailing whitespace, large-file guard,
+#                        YAML/TOML/JSON syntax, merge-conflict detector,
+#                        SSH/PEM private-key catcher
+#
+# A commit is BLOCKED if any hook fails. To bypass in an emergency:
+#   git commit --no-verify   (NEVER do this without a second reviewer)
+
+repos:
+  # ---------------------------------------------------------------------------
+  # Secret detection — PRIMARY defense against credential leaks
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+        args: [--config, .gitleaks.toml]
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+        # To update the baseline after intentional secret additions:
+        #   detect-secrets scan --baseline .secrets.baseline
+
+  # ---------------------------------------------------------------------------
+  # Hygiene hooks
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+        exclude: '\.svg$|\.min\.(js|css)$'
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb, 1024]   # Block files > 1MB (catches ML models, dumps)
+        exclude: |
+          (?x)^(
+            apps/web/pnpm-lock\.yaml|
+            apps/web/tsconfig\.tsbuildinfo|
+            infra/security/zap-rules\.tsv
+          )$
+      - id: check-yaml
+        args: [--unsafe]
+        exclude: '^\.github/workflows/.*$'   # GH Actions has its own YAML quirks
+      - id: check-toml
+      - id: check-json
+        exclude: '\.vscode/.*|\.devcontainer/.*'
+      - id: detect-private-key
+        # Backup catch for SSH/PEM/PGP keys that gitleaks might miss
+        exclude: '^docs/security/SECRET_ROTATION_RUNBOOK\.md$'

@@ -27,6 +27,18 @@ because they are critical for security monitoring and must be persisted even
 if the request fails. For high-volume operations (e.g. paginated list reads),
 use audit_log_async() which posts to a background queue.
 
+FIX (T3): audit_log() no longer calls db.commit(). It now only stages the
+INSERT via db.execute() and lets the caller's transaction (managed by
+get_db()'s session-per-request commit) persist it. This fixes a silent-
+data-loss bug where, if audit_log()'s own commit failed, it would rollback
+the caller's pending writes (consent grants, DSR filings, grievances) —
+the API would return 201 success but the rows would never be persisted.
+
+For the rare case where you WANT the audit entry to commit independently
+(e.g. in a background task with no caller transaction), use the new
+audit_log_independent() function which preserves the old commit-then-
+rollback-on-failure behavior.
+
 Usage:
     from krishisetu.core.audit_logger import audit_log, AuditAction
 
@@ -45,7 +57,6 @@ Usage:
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -150,82 +161,28 @@ class AuditOutcome(str, Enum):
     ERROR = "error"
 
 
-async def audit_log(
+# Internal: build + stage the INSERT (no commit)
+async def _stage_audit_insert(
     db: AsyncSession,
     *,
+    audit_id: UUID,
     action: AuditAction,
     actor_id: UUID | str | None,
-    actor_role: str | None = None,
-    resource_type: str | None = None,
-    resource_id: UUID | str | None = None,
-    outcome: AuditOutcome = AuditOutcome.SUCCESS,
-    details: dict[str, Any] | None = None,
-    request: Request | None = None,
-    ip_address: str | None = None,
-    user_agent: str | None = None,
-    request_id: str | None = None,
-) -> UUID:
-    """Write an audit log entry.
+    actor_role: str | None,
+    resource_type: str | None,
+    resource_id: UUID | str | None,
+    outcome: AuditOutcome,
+    safe_details: dict[str, Any],
+    ip_address: str | None,
+    user_agent: str | None,
+    request_id: str | None,
+) -> None:
+    """Stage the audit INSERT into the session without committing.
 
-    Args:
-        db: async DB session
-        action: what happened (AuditAction enum value)
-        actor_id: who did it (user ID, or None for system/anonymous)
-        actor_role: role of the actor at time of action
-        resource_type: what kind of resource was affected
-        resource_id: ID of the affected resource
-        outcome: success/failure/denied/error
-        details: additional structured context (JSONB in DB)
-        request: FastAPI Request (used to extract IP, UA, request_id)
-        ip_address: explicit IP (overrides request extraction)
-        user_agent: explicit UA (overrides request extraction)
-        request_id: explicit request_id (overrides request extraction)
-
-    Returns:
-        The UUID of the created audit log entry.
-
-    Notes:
-        - This function NEVER raises — audit logging failures are swallowed
-          and logged via structlog so the original operation can complete.
-          Losing an audit entry is bad but failing the user's request
-          because the audit table is full is worse. Monitor the
-          "audit.write_failed" log events to detect audit table issues.
-        - The `details` dict is JSON-serialized; do NOT put binary data or
-          non-JSON-serializable objects in it.
-        - PII fields should be referenced by name in details, never by value.
-          E.g. {"fields_read": ["aadhaar_hash"]} — NOT {"aadhaar": "1234..."}.
+    Called by both audit_log() and audit_log_independent(). The caller
+    decides whether to commit (audit_log_independent) or let the
+    session-per-request transaction handle it (audit_log).
     """
-    audit_id = uuid4()
-
-    # Extract request context if provided
-    if request is not None:
-        if ip_address is None:
-            ip_address = (
-                request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-                or (request.client.host if request.client else None)
-            )
-        if user_agent is None:
-            user_agent = request.headers.get("user-agent")
-        if request_id is None:
-            request_id = getattr(request.state, "request_id", None)
-
-    # Sanitize details — never allow PII values, only field names
-    safe_details: dict[str, Any] = {}
-    if details:
-        for k, v in details.items():
-            # Best-effort: stringify anything that isn't already a primitive
-            if isinstance(v, (str, int, float, bool, type(None), list, dict)):
-                safe_details[k] = v
-            else:
-                try:
-                    safe_details[k] = str(v)
-                except Exception:
-                    safe_details[k] = "<unrepresentable>"
-
-    # Serialize actor/resource IDs to strings for JSON storage
-    actor_id_str = str(actor_id) if actor_id is not None else None
-    resource_id_str = str(resource_id) if resource_id is not None else None
-
     insert_sql = text("""
         INSERT INTO audit.audit_logs
             (id, action, outcome, actor_id, actor_role,
@@ -241,10 +198,10 @@ async def audit_log(
         "id": str(audit_id),
         "action": action.value,
         "outcome": outcome.value,
-        "actor_id": actor_id_str,
+        "actor_id": str(actor_id) if actor_id is not None else None,
         "actor_role": actor_role,
         "resource_type": resource_type,
-        "resource_id": resource_id_str,
+        "resource_id": str(resource_id) if resource_id is not None else None,
         "details": json.dumps(safe_details, default=str),
         "ip_address": ip_address,
         "user_agent": user_agent,
@@ -252,23 +209,205 @@ async def audit_log(
         "occurred_at": datetime.now(timezone.utc),
     }
 
+    await db.execute(insert_sql, params)
+
+
+def _sanitize_details(details: dict[str, Any] | None) -> dict[str, Any]:
+    """Sanitize the details dict — never allow non-JSON-serializable values."""
+    safe: dict[str, Any] = {}
+    if not details:
+        return safe
+    for k, v in details.items():
+        if isinstance(v, (str, int, float, bool, type(None), list, dict)):
+            safe[k] = v
+        else:
+            try:
+                safe[k] = str(v)
+            except Exception:
+                safe[k] = "<unrepresentable>"
+    return safe
+
+
+def _extract_request_context(
+    request: Request | None,
+    ip_address: str | None,
+    user_agent: str | None,
+    request_id: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Extract IP, UA, request_id from the FastAPI Request if not explicitly given."""
+    if request is None:
+        return ip_address, user_agent, request_id
+    if ip_address is None:
+        ip_address = (
+            request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+            or (request.client.host if request.client else None)
+        )
+    if user_agent is None:
+        user_agent = request.headers.get("user-agent")
+    if request_id is None:
+        request_id = getattr(request.state, "request_id", None)
+    return ip_address, user_agent, request_id
+
+
+# Public: audit_log() — stages the INSERT, does NOT commit
+async def audit_log(
+    db: AsyncSession,
+    *,
+    action: AuditAction,
+    actor_id: UUID | str | None,
+    actor_role: str | None = None,
+    resource_type: str | None = None,
+    resource_id: UUID | str | None = None,
+    outcome: AuditOutcome = AuditOutcome.SUCCESS,
+    details: dict[str, Any] | None = None,
+    request: Request | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+    request_id: str | None = None,
+) -> UUID:
+    """Write an audit log entry WITHOUT committing.
+
+    Args:
+        db: async DB session — the INSERT is staged here and committed by
+            the caller's transaction (typically get_db()'s session-per-
+            request commit). This is the correct behavior because:
+            - It keeps the audit entry in the same transaction as the
+              business operation it records → atomicity.
+            - It avoids the old silent-data-loss bug where audit_log()'s
+              own commit-then-rollback-on-failure would roll back the
+              caller's pending writes (consent grants, DSRs, grievances).
+        action: what happened (AuditAction enum value)
+        actor_id: who did it (user ID, or None for system/anonymous)
+        actor_role: role of the actor at time of action
+        resource_type: what kind of resource was affected
+        resource_id: ID of the affected resource
+        outcome: success/failure/denied/error
+        details: additional structured context (JSONB in DB)
+        request: FastAPI Request (used to extract IP, UA, request_id)
+        ip_address: explicit IP (overrides request extraction)
+        user_agent: explicit UA (overrides request extraction)
+        request_id: explicit request_id (overrides request extraction)
+
+    Returns:
+        The UUID of the staged audit log entry.
+
+    Notes:
+        - This function NEVER raises — audit logging failures are swallowed
+          and logged via structlog so the original operation can complete.
+          Losing an audit entry is bad but failing the user's request
+          because the audit table is full is worse. Monitor the
+          "audit.write_failed" log events to detect audit table issues.
+        - Because we no longer commit here, a failure to STAGE the INSERT
+          (e.g. DB connection lost) is logged but does NOT roll back the
+          caller's transaction. The caller's commit will still succeed
+          with their business data — only the audit entry is lost.
+        - The `details` dict is JSON-serialized; do NOT put binary data or
+          non-JSON-serializable objects in it.
+        - PII fields should be referenced by name in details, never by value.
+          E.g. {"fields_read": ["aadhaar_hash"]} — NOT {"aadhaar": "1234..."}.
+    """
+    audit_id = uuid4()
+    ip_address, user_agent, request_id = _extract_request_context(
+        request, ip_address, user_agent, request_id
+    )
+    safe_details = _sanitize_details(details)
+
     try:
-        await db.execute(insert_sql, params)
-        await db.commit()
+        await _stage_audit_insert(
+            db,
+            audit_id=audit_id,
+            action=action,
+            actor_id=actor_id,
+            actor_role=actor_role,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            outcome=outcome,
+            safe_details=safe_details,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            request_id=request_id,
+        )
     except Exception as e:
         # CRITICAL: never let audit failure break the user's request.
         # Log loudly so monitoring catches it.
+        # NOTE: we do NOT rollback here — the caller's transaction should
+        # still be allowed to commit its business data. A failed audit
+        # INSERT only affects the audit row, not the business rows.
         logger.error(
             "audit.write_failed",
             action=action.value,
-            actor_id=actor_id_str,
+            actor_id=str(actor_id) if actor_id is not None else None,
             resource_type=resource_type,
-            resource_id=resource_id_str,
+            resource_id=str(resource_id) if resource_id is not None else None,
             error=str(e),
             error_type=type(e).__name__,
         )
-        # Try to rollback so the session is not in a broken state for
-        # subsequent operations in the same request.
+
+    return audit_id
+
+
+# Public: audit_log_independent() — stages + commits in its own transaction
+async def audit_log_independent(
+    db: AsyncSession,
+    *,
+    action: AuditAction,
+    actor_id: UUID | str | None,
+    actor_role: str | None = None,
+    resource_type: str | None = None,
+    resource_id: UUID | str | None = None,
+    outcome: AuditOutcome = AuditOutcome.SUCCESS,
+    details: dict[str, Any] | None = None,
+    request: Request | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+    request_id: str | None = None,
+) -> UUID:
+    """Write an audit log entry and commit it in its own transaction.
+
+    Use this variant when:
+    - You are in a background task (Celery) with no caller transaction
+    - You want the audit entry to persist even if a later operation fails
+    - You are auditing a security event (CSRF violation, rate limit) that
+      must be recorded regardless of what happens next
+
+    DO NOT use this in normal request flow — there, use audit_log() so the
+    audit entry commits atomically with the business operation.
+
+    On commit failure, logs the error and rolls back the session so it's
+    not in a broken state for subsequent operations.
+    """
+    audit_id = uuid4()
+    ip_address, user_agent, request_id = _extract_request_context(
+        request, ip_address, user_agent, request_id
+    )
+    safe_details = _sanitize_details(details)
+
+    try:
+        await _stage_audit_insert(
+            db,
+            audit_id=audit_id,
+            action=action,
+            actor_id=actor_id,
+            actor_role=actor_role,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            outcome=outcome,
+            safe_details=safe_details,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            request_id=request_id,
+        )
+        await db.commit()
+    except Exception as e:
+        logger.error(
+            "audit.write_failed",
+            action=action.value,
+            actor_id=str(actor_id) if actor_id is not None else None,
+            resource_type=resource_type,
+            resource_id=str(resource_id) if resource_id is not None else None,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
         try:
             await db.rollback()
         except Exception:
@@ -315,5 +454,6 @@ __all__ = [
     "AuditAction",
     "AuditOutcome",
     "audit_log",
+    "audit_log_independent",
     "audit_log_pii_access",
 ]

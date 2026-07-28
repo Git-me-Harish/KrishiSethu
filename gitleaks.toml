@@ -1,0 +1,35 @@
+# gitleaks configuration for KrishiSetu
+#
+# Extends the default gitleaks ruleset and adds an allowlist for files that
+# legitimately contain secret-shaped placeholder strings (env examples,
+# secret-rotation docs, test fixtures, i18n message bundles).
+
+title = "KrishiSetu gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlist for example/template/test files"
+
+# Regex-matched paths — gitleaks will SKIP these entirely.
+paths = [
+    '''\.env\.example$''',
+    '''\.env\.example\..*$''',
+    '''docs/security/SECRET_ROTATION_RUNBOOK\.md$''',
+    '''apps/api/tests/.*$''',
+    '''apps/web/src/i18n/.*$''',
+    '''\.pre-commit-config\.yaml$''',
+    '''\.gitleaks\.toml$''',
+]
+
+# Regex-matched raw content — gitleaks will not flag lines matching these.
+# Use sparingly; prefer path-based allowlisting above.
+regexes = [
+    # Explicit dev placeholder strings used in env examples
+    '''change-me-to-a-256-bit-random-secret-please-use-openssl-rand-hex-32''',
+    '''dev-only-secret-please-change-in-production-with-openssl-rand-hex-32''',
+    '''krishisetu_dev_password''',
+    '''rzp_test_XXXXXXXX''',
+    '''XXXXXXXXXXXXXXXX''',
+]

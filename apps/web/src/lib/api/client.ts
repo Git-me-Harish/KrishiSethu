@@ -1,22 +1,6 @@
-/**
- * API client — single fetch wrapper used by all domain API modules.
- *
- * - Reads the base URL from NEXT_PUBLIC_API_URL (defaults to localhost:8000)
- * - Injects the JWT bearer token from tokenStorage on every request
- * - Handles 401 by attempting a single token refresh, then retries
- * - Parses JSON error envelopes into Error instances with helpful messages
- * - Forwards the X-Request-ID header when present (set by the API on responses)
- *
- * FIX: All `import type` statements moved to the top of the file.
- * The original had them scattered mid-file (after authApi, privacyApi etc.),
- * which caused Next.js 14's next-flight-client-entry-loader to fail during
- * RSC module graph analysis, producing the webpack
- * "Cannot read properties of undefined (reading 'call')" crash on every page.
- */
-
-// ---------------------------------------------------------------------------
+// API client — single fetch wrapper used by all domain API modules.
 // All imports at the top — required for Next.js 14 RSC module graph analysis
-// ---------------------------------------------------------------------------
+
 import type { ApiError, TokenPair, UserPublic } from "./types";
 export type { UserPublic };
 import type { ConsentRecord, ConsentStatusResponse } from "./types";
@@ -37,10 +21,8 @@ const ACCESS_TOKEN_KEY = "krishisetu_access_token";
 const REFRESH_TOKEN_KEY = "krishisetu_refresh_token";
 const USER_KEY = "krishisetu_user";
 
-// ---------------------------------------------------------------------------
-// Token storage (localStorage, SSR-safe)
-// ---------------------------------------------------------------------------
 
+// Token storage (localStorage, SSR-safe)
 export const tokenStorage = {
   getAccessToken(): string | null {
     if (typeof window === "undefined") return null;
@@ -80,18 +62,16 @@ export const tokenStorage = {
   },
 };
 
-// ---------------------------------------------------------------------------
-// Core fetch wrapper
-// ---------------------------------------------------------------------------
 
-interface FetchOptions extends RequestInit {
+// Core fetch wrapper — EXPORTED so per-domain modules can use it
+export interface FetchOptions extends RequestInit {
   /** Skip auth header (for login endpoints) */
   skipAuth?: boolean;
   /** Query parameters */
   query?: Record<string, string | number | boolean | undefined | null>;
 }
 
-async function apiFetch<T>(
+export async function apiFetch<T>(
   path: string,
   options: FetchOptions = {},
 ): Promise<T> {
@@ -185,14 +165,8 @@ async function tryRefresh(): Promise<boolean> {
   return refreshPromise;
 }
 
-// ---------------------------------------------------------------------------
-// Auth API
-// ---------------------------------------------------------------------------
 
-/**
- * FIX: sendOtp return type corrected to match backend SendOTPResponse schema.
- * Original declared { message, otp_sent } which don't exist on the response.
- */
+// Auth API
 export interface SendOtpResponse {
   phone: string;
   purpose: string;
@@ -243,11 +217,6 @@ export const authApi = {
     return data;
   },
 
-  /**
-   * FIX: now sends refresh_token in the request body.
-   * Original sent no body — backend LogoutRequest requires refresh_token,
-   * so the server returned 422 and never revoked the token.
-   */
   async logout(): Promise<void> {
     const refreshToken = tokenStorage.getRefreshToken();
     try {
@@ -285,11 +254,6 @@ export const authApi = {
     return data;
   },
 
-  /**
-   * Complete the Google OAuth flow from the frontend callback page.
-   * Called by /app/auth/callback/page.tsx after the backend redirects
-   * with access_token + refresh_token in URL params.
-   */
   async completeGoogleOAuth(
     accessToken: string,
     refreshToken: string,
@@ -301,10 +265,8 @@ export const authApi = {
   },
 };
 
-// ---------------------------------------------------------------------------
-// Consent API (Phase F)
-// ---------------------------------------------------------------------------
 
+// Consent API (Phase F)
 export const consentApi = {
   async getStatus(): Promise<ConsentStatusResponse> {
     return apiFetch<ConsentStatusResponse>("/consent");
@@ -326,9 +288,8 @@ export const consentApi = {
   },
 };
 
-// ---------------------------------------------------------------------------
+
 // Privacy / DSR / Grievances API (Phase F)
-// ---------------------------------------------------------------------------
 
 export const privacyApi = {
   async fileDsr(payload: {
@@ -381,10 +342,8 @@ export const privacyApi = {
   },
 };
 
-// ---------------------------------------------------------------------------
-// Audit API (Phase F — admin only)
-// ---------------------------------------------------------------------------
 
+// Audit API (Admin only)
 export const auditApi = {
   async searchLogs(params: {
     actor_id?: string;
@@ -406,13 +365,11 @@ export const auditApi = {
   },
 };
 
-// ---------------------------------------------------------------------------
-// Backwards-compat exports
-// ---------------------------------------------------------------------------
 
+// Generic helper — for ad-hoc calls not covered by a domain module
 export const apiClient = {
-  get: <T>(path: string, query?: Record<string, unknown>) =>
-    apiFetch<T>(path, { query: query as FetchOptions["query"] }),
+  get: <T>(path: string, query?: FetchOptions["query"]) =>
+    apiFetch<T>(path, { query }),
   post: <T>(path: string, body?: unknown) =>
     apiFetch<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body?: unknown) =>

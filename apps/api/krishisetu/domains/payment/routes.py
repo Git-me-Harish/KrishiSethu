@@ -8,6 +8,13 @@ Endpoints:
 - POST /payments/{id}/refund     — Process refund
 - POST /payments/webhook         — Razorpay webhook handler
 - POST /payments/{id}/release    — Release escrow (admin/supplier only)
+
+FIX (T3): release_escrow was previously gated by PERM_MARKETPLACE_ORDER —
+a farmer permission — meaning any farmer could release their own escrowed
+payment to themselves (or any UUID) before delivery. It is now gated by
+require_role(UserRole.ADMIN, UserRole.SUPPLIER) and the service layer
+verifies that the released_to_user_id actually owns an item in the order
+being released.
 """
 
 from __future__ import annotations
@@ -15,16 +22,12 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, Header, Path, Query, Request, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Path, Query, Request, status
+from pydantic import BaseModel, Field
 
-from krishisetu.core.dependencies import CurrentUser, DBSession, require_permissions
+from krishisetu.core.dependencies import CurrentUser, DBSession, require_role
 from krishisetu.core.logging import get_logger
-from krishisetu.domains.identity.permissions import (
-    PERM_MARKETPLACE_ORDER,
-    PERM_INSURANCE_APPLY,
-    PERM_MARKETPLACE_READ_OWN_ORDERS,
-)
+from krishisetu.domains.identity.models import UserRole
 from krishisetu.domains.payment import services
 from krishisetu.domains.payment.models import PaymentStatus
 from krishisetu.domains.payment.schemas import (
@@ -38,6 +41,28 @@ from krishisetu.domains.payment.schemas import (
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/payments", tags=["payments"])
+
+
+
+# Typed request bodies (replaces the old `payload: BaseModel = Body(...)`)
+class ReleaseEscrowRequest(BaseModel):
+    """Request body for POST /payments/{id}/release.
+
+    FIX (T3): the old route used `payload: BaseModel = Body(...)` which
+    accepted any shape and required `.dict().get("released_to_user_id")`
+    to extract the value — no validation, no OpenAPI schema. This typed
+    body gives proper validation, error messages, and OpenAPI docs.
+    """
+
+    released_to_user_id: UUID = Field(
+        ...,
+        description=(
+            "UUID of the user to release the escrow to (the supplier who "
+            "fulfilled the order, or the farmer for an insurance payout). "
+            "The service layer verifies this user actually owns an item in "
+            "the order — a farmer cannot release escrow to themselves."
+        ),
+    )
 
 
 @router.post(
@@ -115,34 +140,40 @@ async def refund_payment(
 @router.post(
     "/{payment_id}/release",
     response_model=PaymentResponse,
-    dependencies=[Depends(require_permissions(PERM_MARKETPLACE_ORDER))],
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPPLIER))],
 )
 async def release_escrow(
     payment_id: Annotated[UUID, Path()],
+    payload: ReleaseEscrowRequest,
     current_user: CurrentUser,
     db: DBSession,
-    payload: BaseModel = Body(...),
 ) -> PaymentResponse:
-    """Release escrowed payment to supplier.
+    """Release escrowed payment to supplier or farmer.
+
+    Authorization: ADMIN or SUPPLIER role only.
+    - SUPPLIER releases escrow to themselves after fulfilling an order.
+      The service verifies the released_to_user_id matches the supplier's
+      own user_id AND that the supplier owns an item in the order.
+    - ADMIN can release escrow to any legitimate recipient (the service
+      still verifies the recipient owns an item in the order).
+
+    Body: {"released_to_user_id": "uuid"}
 
     Called when:
     - Marketplace order delivered → release to supplier
     - Insurance claim approved → release payout to farmer
-
-    Body: {"released_to_user_id": "uuid"}
     """
-    released_to = payload.dict().get("released_to_user_id")
-    if not released_to:
-        from krishisetu.core.exceptions import ValidationError
-        raise ValidationError("released_to_user_id is required")
-
     return await services.release_escrow(
-        db, payment_id, UUID(str(released_to))
+        db,
+        payment_id,
+        payload.released_to_user_id,
+        released_by=current_user,
     )
 
 
 @router.get(
     "",
+    response_model=list[PaymentResponse] | dict,
 )
 async def list_my_payments(
     current_user: CurrentUser,
@@ -172,17 +203,13 @@ async def get_payment(
     return await services.get_payment(db, payment_id, current_user.id)
 
 
-# ---------------------------------------------------------------------------
 # Webhook (no auth — called by Razorpay)
-# ---------------------------------------------------------------------------
-
-
 @router.post("/webhook", status_code=status.HTTP_200_OK)
 async def razorpay_webhook(
     request: Request,
     db: DBSession,
-    x_razorpay_signature: str | None = Header(default=None),
-    x_razorpay_event_id: str | None = Header(default=None),
+    x_razorpay_signature: str | None = None,
+    x_razorpay_event_id: str | None = None,
 ):
     """Razorpay webhook handler.
 

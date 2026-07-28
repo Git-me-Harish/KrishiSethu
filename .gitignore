@@ -1,11 +1,26 @@
-# Environment
+
+# Environment & Secrets
+
 .env
 .env.local
 .env.*.local
 apps/api/.env
 apps/web/.env
+apps/ml-inference/.env
+
+# Cloud provider credentials (Firebase/AWS/GCP service-account JSONs)
+*-firebase-adminsdk-*.json
+*service-account*.json
+firebase-adminsdk-*.json
+google-credentials*.json
+aws-credentials*.json
+
+# Secret baselines (used by detect-secrets pre-commit hook)
+.secrets.baseline
+
 
 # Python
+
 __pycache__/
 *.py[cod]
 *$py.class
@@ -52,7 +67,9 @@ dmypy.json
 .pyre/
 .pytype/
 
+
 # Node
+
 node_modules/
 .pnp
 .pnp.js
@@ -63,6 +80,7 @@ node_modules/
 out/
 build/
 next-env.d.ts
+apps/web/tsconfig.tsbuildinfo
 
 # Production
 *.log
@@ -71,7 +89,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+
 # IDE
+
 .vscode/
 .idea/
 *.swp
@@ -79,16 +99,26 @@ pnpm-debug.log*
 *~
 .DS_Store
 
+
 # Docker
+
 docker-compose.override.yml
 
+
+# Celery (generated beat schedule binary)
+celerybeat-schedule
+apps/api/celerybeat-schedule
+
 # Data
+
 *.sqlite
 *.sqlite3
 data/
 uploads/
 
-# ML artifacts
+
+# ML artifacts (never commit trained model weights)
+
 *.pt
 *.pth
 *.onnx
@@ -97,17 +127,18 @@ uploads/
 mlruns/
 mlartifacts/
 
+
 # OS
+
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 
-# Secrets
+
+# Secrets directory (local-only key material)
+
 *.pem
 *.key
 *.p12
 secrets/
-
-# Keys
-krishisethu-8e872-firebase-adminsdk-fbsvc-2fa055f29d.jsonapps/web/tsconfig.tsbuildinfo

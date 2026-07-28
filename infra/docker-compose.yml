@@ -4,14 +4,35 @@
 #   docker compose -f infra/docker-compose.yml up -d
 #
 # Services:
-#   - postgres  : PostgreSQL 16 + PostGIS    (port 5432)
-#   - redis     : Redis 7                    (port 6379)
-#   - minio     : S3-compatible object store (ports 9000, 9001)
-#   - api       : FastAPI backend            (port 8000)
-#   - web       : Next.js 14 frontend        (port 3000)
+#   - postgres  : PostgreSQL 16 + PostGIS    (127.0.0.1:5432)
+#   - redis     : Redis 7                    (127.0.0.1:6379)
+#   - minio     : S3-compatible object store (127.0.0.1:9000, 127.0.0.1:9002)
+#   - api       : FastAPI backend            (0.0.0.0:8000)
+#   - web       : Next.js 14 frontend        (0.0.0.0:3000)
+#   - ml-inference : ML inference service    (0.0.0.0:8001)
 #
-# Data services (postgres, redis, minio) persist data to named volumes.
-# App services (api, web) mount source code for hot-reload during development.
+# Data services (postgres, redis, minio) persist data to named volumes and are
+# bound to 127.0.0.1 so they are NOT exposed on the LAN — only the host can
+# reach them. App services (api, web, ml-inference) listen on 0.0.0.0 so they
+# can be proxied by nginx in production-like setups.
+#
+# ---------------------------------------------------------------------------
+# SECRETS — read from the root .env file
+# ---------------------------------------------------------------------------
+# All secrets (JWT_SECRET, POSTGRES_PASSWORD, MINIO_ROOT_PASSWORD, etc.) are
+# passed in via the host environment or a root-level .env file (next to this
+# compose file). They are NOT inlined in this compose file anymore — the
+# `${VAR:?error}` syntax below causes `docker compose up` to FAIL FAST if a
+# required secret is missing.
+#
+# Required keys in your root .env (see .env.example for a template):
+#   JWT_SECRET             — generate with `openssl rand -hex 32`
+#   POSTGRES_PASSWORD      — generate with `openssl rand -hex 16`
+#   MINIO_ROOT_PASSWORD    — generate with `openssl rand -hex 16`
+#
+# For PRODUCTION deploys, do NOT use docker-compose directly — use a real
+# orchestrator (k8s, ECS, etc.) with a proper secret manager (Vault, AWS
+# Secrets Manager, Doppler). Docker secrets are fine for staging.
 
 name: krishisetu
 
@@ -27,10 +48,12 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-krishisetu}
       POSTGRES_USER: ${POSTGRES_USER:-krishisetu}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-krishisetu_dev_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
-      - "5432:5432"
+      # Bind to 127.0.0.1 ONLY — never expose Postgres on the LAN.
+      # If you need access from another machine, use an SSH tunnel.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ../services/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
@@ -49,7 +72,8 @@ services:
     restart: unless-stopped
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
-      - "6379:6379"
+      # Bind to 127.0.0.1 ONLY — Redis has no auth by default.
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -67,10 +91,11 @@ services:
     command: server /data --console-address ":9002"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-krishisetu}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env}
     ports:
-      - "9000:9000"   # S3 API
-      - "9002:9002"   # Web console (changed from 9001 due to port conflict on Windows)
+      # Bind to 127.0.0.1 ONLY — MinIO console has no rate limiter.
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9002:9002"   # Web console
     volumes:
       - minio_data:/data
     healthcheck:
@@ -90,7 +115,7 @@ services:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-krishisetu} ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password};
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-krishisetu} ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env};
       mc mb local/${MINIO_BUCKET:-krishisetu} --ignore-existing;
       mc anonymous set download local/${MINIO_BUCKET:-krishisetu};
       echo 'Bucket created successfully';
@@ -109,17 +134,20 @@ services:
     container_name: krishisetu-api
     restart: unless-stopped
     environment:
-      ENV: development
-      DEBUG: "true"
-      LOG_LEVEL: INFO
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:-krishisetu_dev_password}@postgres:5432/${POSTGRES_DB:-krishisetu}
+      ENV: ${ENV:-development}
+      DEBUG: ${DEBUG:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-krishisetu}
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
-      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env}
       S3_BUCKET_NAME: ${MINIO_BUCKET:-krishisetu}
       S3_REGION: ap-south-1
-      JWT_SECRET: dev-only-secret-please-change-in-production-with-openssl-rand-hex-32
+      # JWT_SECRET is REQUIRED — no inline dev default. Set it in your .env.
+      # In dev you can use:  JWT_SECRET=dev-only-secret-please-change-in-production-with-openssl-rand-hex-32
+      # In prod the config.py validator will refuse to boot with that value.
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env (generate with: openssl rand -hex 32)}
       CORS_ORIGINS: '["http://localhost:3000"]'
     ports:
       - "8000:8000"
@@ -202,7 +230,7 @@ services:
       ML_PORT: 8001
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
-      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env}
       S3_BUCKET_NAME: krishisetu-models
       S3_REGION: ap-south-1
       DISEASE_CLASSIFIER_MODEL_PATH: /app/models/disease_classifier_dummy.onnx
@@ -241,17 +269,17 @@ services:
     container_name: krishisetu-worker
     restart: unless-stopped
     environment:
-      ENV: development
-      DEBUG: "true"
-      LOG_LEVEL: INFO
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:-krishisetu_dev_password}@postgres:5432/${POSTGRES_DB:-krishisetu}
+      ENV: ${ENV:-development}
+      DEBUG: ${DEBUG:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-krishisetu}
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
-      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env}
       S3_BUCKET_NAME: ${MINIO_BUCKET:-krishisetu}
       S3_REGION: ap-south-1
-      JWT_SECRET: dev-only-secret-please-change-in-production-with-openssl-rand-hex-32
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env (generate with: openssl rand -hex 32)}
       ML_INFERENCE_URL: http://ml-inference:8001
     volumes:
       - ../apps/api:/app
@@ -290,17 +318,17 @@ services:
     container_name: krishisetu-celery-beat
     restart: unless-stopped
     environment:
-      ENV: development
-      DEBUG: "true"
-      LOG_LEVEL: INFO
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:-krishisetu_dev_password}@postgres:5432/${POSTGRES_DB:-krishisetu}
+      ENV: ${ENV:-development}
+      DEBUG: ${DEBUG:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-krishisetu}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-krishisetu}
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-krishisetu}
-      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-krishisetu_dev_password}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env}
       S3_BUCKET_NAME: ${MINIO_BUCKET:-krishisetu}
       S3_REGION: ap-south-1
-      JWT_SECRET: dev-only-secret-please-change-in-production-with-openssl-rand-hex-32
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env (generate with: openssl rand -hex 32)}
       ML_INFERENCE_URL: http://ml-inference:8001
     volumes:
       - ../apps/api:/app
@@ -365,7 +393,8 @@ services:
     profiles: ["security"]
     restart: unless-stopped
     ports:
-      - "3310:3310"
+      # Bind to 127.0.0.1 ONLY — ClamAV has no auth.
+      - "127.0.0.1:3310:3310"
     volumes:
       - clamav_data:/var/lib/clamav
     healthcheck:

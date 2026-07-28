@@ -11,19 +11,32 @@ Endpoints:
 - POST /auth/logout-all        — revoke all sessions for current user
 - GET  /me                     — get current user profile
 - PATCH /me                    — update current user profile
+
+FIX (T3): the three auth endpoints that accept credentials
+(/auth/send-otp, /auth/verify-otp, /auth/login-password) are now
+rate-limited via slowapi using the RATE_LIMIT_AUTH setting (default
+5/minute per IP). This closes a brute-force hole — previously an attacker
+could send unlimited OTP requests (driving up MSG91 costs) or brute-force
+passwords / OTPs with no throttling.
+
+Note: the OTP-send service layer has its own per-phone rate limit (60s
+cooldown + hourly/daily caps) via Redis, but the HTTP layer had no
+per-IP limit — meaning an attacker could rotate phone numbers and send
+millions of OTPs. The HTTP rate limit closes that hole.
 """
 
 from __future__ import annotations
 
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from krishisetu.core.config import settings
-from krishisetu.core.dependencies import CurrentUser, DBSession
+from krishisetu.core.dependencies import CurrentUser, DBSession, require_role
 from krishisetu.core.logging import get_logger
+from krishisetu.core.rate_limit import limiter, rate_limit_auth
 from krishisetu.domains.identity import services
 from krishisetu.domains.identity.models import UserRole
 from krishisetu.domains.identity.schemas import (
@@ -41,12 +54,7 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
-
-# ---------------------------------------------------------------------------
 # Helper: extract device info from request
-# ---------------------------------------------------------------------------
-
-
 def _get_device_info(request: Request) -> tuple[str | None, str | None]:
     """Extract User-Agent and client IP from the request."""
     user_agent = request.headers.get("User-Agent")
@@ -62,11 +70,7 @@ def _get_device_info(request: Request) -> tuple[str | None, str | None]:
     return user_agent, client_ip
 
 
-# ---------------------------------------------------------------------------
 # OTP-based authentication
-# ---------------------------------------------------------------------------
-
-
 class SendOTPResponse(BaseModel):
     """Response for POST /auth/send-otp."""
 
@@ -82,26 +86,37 @@ class SendOTPResponse(BaseModel):
 
 
 @router.post("/send-otp", response_model=SendOTPResponse, status_code=202)
+@limiter.limit(rate_limit_auth)
 async def send_otp(
+    request: Request,
     payload: SendOTPRequest,
     db: DBSession,
 ) -> SendOTPResponse:
-    """Request an OTP to be sent via SMS to the given phone number."""
+    """Request an OTP to be sent via SMS to the given phone number.
+
+    Rate-limited to RATE_LIMIT_AUTH (default 5/minute per IP) to prevent
+    OTP-sms cost attacks and phone-number enumeration.
+    """
     result = await services.send_otp(db, payload.phone, payload.purpose)
     return SendOTPResponse(**result)
 
 
 @router.post("/verify-otp", response_model=TokenResponse, status_code=200)
+@limiter.limit(rate_limit_auth)
 async def verify_otp(
+    request: Request,  # REQUIRED by slowapi
     payload: VerifyOTPRequest,
     db: DBSession,
-    request: Request,
 ) -> TokenResponse:
     """Verify an OTP and authenticate the user.
 
     If the phone number is already registered → login.
     If the phone number is NOT registered → signup (full_name required).
     Returns access_token + refresh_token on success.
+
+    Rate-limited to RATE_LIMIT_AUTH (default 5/minute per IP) to prevent
+    OTP brute-force (a 6-digit OTP has 1M combinations — at 5/min that's
+    ~139 days to exhaust, which is well beyond the 5-minute OTP TTL).
     """
     device_info, ip_address = _get_device_info(request)
     return await services.verify_otp(
@@ -115,11 +130,7 @@ async def verify_otp(
     )
 
 
-# ---------------------------------------------------------------------------
 # Password-based authentication (alternative)
-# ---------------------------------------------------------------------------
-
-
 class PasswordLoginRequest(BaseModel):
     """Request body for POST /auth/login-password."""
 
@@ -132,15 +143,20 @@ class PasswordLoginRequest(BaseModel):
 
 
 @router.post("/login-password", response_model=TokenResponse, status_code=200)
+@limiter.limit(rate_limit_auth)
 async def login_with_password(
+    request: Request,  # REQUIRED by slowapi
     payload: PasswordLoginRequest,
     db: DBSession,
-    request: Request,
 ) -> TokenResponse:
     """Login with phone/email and password.
 
     Used by admin, officer, supplier, and insurer accounts that have
     passwords set. Farmers typically use OTP-only auth.
+
+    Rate-limited to RATE_LIMIT_AUTH (default 5/minute per IP) to prevent
+    password brute-force. The service layer additionally locks the account
+    after 5 failed attempts (see identity/services.login_with_password).
     """
     device_info, ip_address = _get_device_info(request)
     return await services.login_with_password(
@@ -151,12 +167,7 @@ async def login_with_password(
         ip_address=ip_address,
     )
 
-
-# ---------------------------------------------------------------------------
 # Google OAuth
-# ---------------------------------------------------------------------------
-
-
 @router.get("/google", status_code=302)
 async def google_oauth_start() -> RedirectResponse:
     """Start Google OAuth flow by redirecting the user to Google.
@@ -262,11 +273,7 @@ async def google_oauth_callback(
     return RedirectResponse(url=redirect_url, status_code=302)
 
 
-# ---------------------------------------------------------------------------
 # Token refresh
-# ---------------------------------------------------------------------------
-
-
 @router.post("/refresh", response_model=TokenResponse, status_code=200)
 async def refresh_token(
     payload: RefreshTokenRequest,
@@ -276,6 +283,11 @@ async def refresh_token(
     """Exchange a refresh token for a new access + refresh token pair.
 
     Implements refresh token rotation with reuse detection.
+
+    Not rate-limited at the HTTP layer (refresh tokens are bearer tokens —
+    an attacker who has one can already impersonate the user; rate-limiting
+    refresh would just DoS legitimate users whose access token expired).
+    The service layer enforces reuse detection which is the right defense.
     """
     device_info, ip_address = _get_device_info(request)
     return await services.refresh_access_token(
@@ -285,12 +297,7 @@ async def refresh_token(
         ip_address=ip_address,
     )
 
-
-# ---------------------------------------------------------------------------
 # Aadhaar e-KYC (Phase D)
-# ---------------------------------------------------------------------------
-
-
 class AadhaarSendOTPRequest(BaseModel):
     """Request body for POST /auth/aadhaar/send-otp."""
 
@@ -300,15 +307,12 @@ class AadhaarSendOTPRequest(BaseModel):
         max_length=12,
         description="12-digit Aadhaar number",
     )
-
-
 class AadhaarVerifyOTPRequest(BaseModel):
     """Request body for POST /auth/aadhaar/verify-otp."""
 
     aadhaar: str = Field(..., min_length=12, max_length=12)
     otp: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
     transaction_id: str = Field(..., min_length=10, max_length=64)
-
 
 class AadhaarOTPResponse(BaseModel):
     """Response for Aadhaar OTP send."""
@@ -317,7 +321,6 @@ class AadhaarOTPResponse(BaseModel):
     message: str
     masked_aadhaar: str
     sent_at: str
-
 
 class AadhaarVerificationResponse(BaseModel):
     """Response for Aadhaar OTP verification."""
@@ -332,11 +335,17 @@ class AadhaarVerificationResponse(BaseModel):
 
 
 @router.post("/aadhaar/send-otp", response_model=AadhaarOTPResponse, status_code=202)
+@limiter.limit(rate_limit_auth)
 async def send_aadhaar_otp(
+    request: Request,  # REQUIRED by slowapi
     payload: AadhaarSendOTPRequest,
     current_user: CurrentUser,
 ) -> AadhaarOTPResponse:
-    """Send Aadhaar OTP for e-KYC verification."""
+    """Send Aadhaar OTP for e-KYC verification.
+
+    Rate-limited to RATE_LIMIT_AUTH (default 5/minute per IP) to prevent
+    UIDAI API cost attacks and Aadhaar-number enumeration.
+    """
     from krishisetu.integrations.uidai import get_uidai_client
 
     client = get_uidai_client()
@@ -351,12 +360,18 @@ async def send_aadhaar_otp(
 
 
 @router.post("/aadhaar/verify-otp", response_model=AadhaarVerificationResponse)
+@limiter.limit(rate_limit_auth)
 async def verify_aadhaar_otp(
+    request: Request,  # REQUIRED by slowapi
     payload: AadhaarVerifyOTPRequest,
     current_user: CurrentUser,
     db: DBSession,
 ) -> AadhaarVerificationResponse:
-    """Verify Aadhaar OTP and mark the user's Aadhaar as verified."""
+    """Verify Aadhaar OTP and mark the user's Aadhaar as verified.
+
+    Rate-limited to RATE_LIMIT_AUTH (default 5/minute per IP) to prevent
+    Aadhaar OTP brute-force.
+    """
     from krishisetu.integrations.uidai import get_uidai_client
     from krishisetu.core.security import hash_aadhaar
     from krishisetu.domains.identity import repository as repo
@@ -393,12 +408,7 @@ async def verify_aadhaar_otp(
         district=result.district,
     )
 
-
-# ---------------------------------------------------------------------------
 # Logout
-# ---------------------------------------------------------------------------
-
-
 @router.post("/logout", status_code=200)
 async def logout(
     payload: LogoutRequest,
@@ -427,10 +437,8 @@ async def logout_all(
     return {"message": "All sessions logged out successfully"}
 
 
-# ---------------------------------------------------------------------------
-# Current user profile (/me)
-# ---------------------------------------------------------------------------
 
+# Current user profile (/me)
 me_router = APIRouter(prefix="/me", tags=["profile"])
 
 
@@ -484,11 +492,12 @@ async def update_me(
     return UserPublic.model_validate(current_user)
 
 
-# ---------------------------------------------------------------------------
 # Admin user management (/admin/users)
-# ---------------------------------------------------------------------------
-
-admin_router = APIRouter(prefix="/admin/users", tags=["admin"])
+admin_router = APIRouter(
+    prefix="/admin/users",
+    tags=["admin"],
+    dependencies=[Depends(require_role(UserRole.ADMIN))],
+)
 
 
 @admin_router.get("", response_model=AdminUserListResponse)
@@ -500,12 +509,15 @@ async def list_users(
     role: UserRole | None = None,
     is_active: bool | None = None,
 ) -> AdminUserListResponse:
-    """List all users with pagination and filters (admin only)."""
-    from krishisetu.core.exceptions import AuthorizationError
+    """List all users with pagination and filters (admin only).
 
-    if current_user.role != UserRole.ADMIN:
-        raise AuthorizationError("Admin access required")
-
+    FIX (T3): the admin role check is now enforced at the router level via
+    `dependencies=[Depends(require_role(UserRole.ADMIN))]` on admin_router,
+    instead of an inline `if current_user.role != UserRole.ADMIN: raise`
+    check inside each handler. This is consistent with how every other
+    role-restricted router in the codebase works, and removes the risk of
+    forgetting the check on a future admin endpoint.
+    """
     from krishisetu.domains.identity import repository as repo
 
     page = max(1, page)
@@ -535,14 +547,14 @@ async def update_user_admin(
     current_user: CurrentUser,
     db: DBSession,
 ) -> UserPublic:
-    """Update a user's role or active status (admin only)."""
+    """Update a user's role or active status (admin only).
+
+    Role check is enforced at the router level (see admin_router above).
+    """
     from uuid import UUID
 
-    from krishisetu.core.exceptions import AuthorizationError, NotFoundError
+    from krishisetu.core.exceptions import NotFoundError
     from krishisetu.domains.identity import repository as repo
-
-    if current_user.role != UserRole.ADMIN:
-        raise AuthorizationError("Admin access required")
 
     try:
         uid = UUID(user_id)

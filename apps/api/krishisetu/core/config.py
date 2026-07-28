@@ -1,17 +1,28 @@
-"""Application configuration loaded from environment variables.
-
-All configuration is validated at startup via Pydantic Settings. A misconfigured
-environment variable causes the application to fail fast at boot, rather than
-fail mysteriously at runtime.
-"""
+"""Application configuration loaded from environment variables"""
 
 from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, HttpUrl, PostgresDsn, RedisDsn, SecretStr, field_validator
+from pydantic import Field, HttpUrl, PostgresDsn, RedisDsn, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+
+# Known dev / placeholder values that MUST NEVER appear in production.
+# If you change these, also update .gitleaks.toml and .env.example so they
+# stay aligned.
+
+_KNOWN_BAD_JWT_SECRETS = frozenset({
+    "dev-only-secret-please-change-in-production-with-openssl-rand-hex-32",
+    "change-me-to-a-256-bit-random-secret-please-use-openssl-rand-hex-32",
+})
+_KNOWN_BAD_S3_SECRETS = frozenset({
+    "krishisetu_dev_password",
+    "change-me",
+    "changeme",
+})
 
 
 class Settings(BaseSettings):
@@ -28,7 +39,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- Environment ---
+    # Environment 
     ENV: Literal["development", "staging", "production"] = Field(
         default="development",
         description="Application environment profile",
@@ -36,7 +47,7 @@ class Settings(BaseSettings):
     DEBUG: bool = Field(default=False, description="Enable debug mode")
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
-    # --- Database ---
+    # Database 
     DATABASE_URL: PostgresDsn = Field(
         ...,
         description="PostgreSQL async connection URL (postgresql+asyncpg://...)",
@@ -46,10 +57,10 @@ class Settings(BaseSettings):
     DB_POOL_TIMEOUT: int = Field(default=30, ge=5, le=120)
     DB_POOL_RECYCLE: int = Field(default=1800, ge=300, le=7200)
 
-    # --- Redis ---
+    # Redis 
     REDIS_URL: RedisDsn = Field(..., description="Redis connection URL")
 
-    # --- Security ---
+    # Security 
     JWT_SECRET: SecretStr = Field(
         ...,
         min_length=32,
@@ -60,33 +71,31 @@ class Settings(BaseSettings):
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=30, ge=1, le=365)
     PASSWORD_BCRYPT_ROUNDS: int = Field(default=12, ge=10, le=15)
 
-    # --- Object Storage ---
+    # Object Storage 
     S3_ENDPOINT: str = Field(..., description="S3-compatible endpoint URL")
     S3_ACCESS_KEY: SecretStr = Field(...)
     S3_SECRET_KEY: SecretStr = Field(...)
     S3_BUCKET_NAME: str = Field(default="krishisetu")
     S3_REGION: str = Field(default="ap-south-1")
 
-    # --- CORS ---
+    # CORS 
     CORS_ORIGINS: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         description="Allowed CORS origins",
     )
 
-    # --- Frontend ---
+    # Frontend
     FRONTEND_URL: str = Field(
         default="http://localhost:3000",
         description="Frontend base URL — used for OAuth callback redirects",
     )
 
-    # --- Rate Limiting ---
+    # Rate Limiting
     RATE_LIMIT_DEFAULT: str = Field(default="100/minute")
     RATE_LIMIT_AUTH: str = Field(default="5/minute")
     RATE_LIMIT_ML: str = Field(default="20/minute")
 
-    # --- Google OAuth ---
-    # Register these in Google Cloud Console → Credentials → OAuth 2.0 Client IDs
-    # The redirect URI must be added to "Authorized redirect URIs" in GCC.
+    # Google OAuth
     GOOGLE_OAUTH_CLIENT_ID: str = Field(
         default="",
         description="Google OAuth 2.0 client ID",
@@ -104,7 +113,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- External APIs (optional in dev) ---
     IMD_API_KEY: SecretStr | None = None
     OPENWEATHERMAP_API_KEY: SecretStr | None = None
     SENTINEL_HUB_CLIENT_ID: SecretStr | None = None
@@ -114,14 +122,11 @@ class Settings(BaseSettings):
     MSG91_AUTH_KEY: SecretStr | None = None
     FCM_SERVER_KEY: SecretStr | None = None
 
-    # --- ML Inference Service ---
     ML_INFERENCE_URL: str = Field(default="http://localhost:8001")
 
-    # --- Observability ---
     OTEL_EXPORTER_OTLP_ENDPOINT: str | None = None
     OTEL_SERVICE_NAME: str = Field(default="krishisetu-api")
 
-    # --- Phase F: Security Hardening ---
     ENCRYPTION_KEY: SecretStr | None = Field(
         default=None,
         description="Base64-encoded 32-byte AES key for field-level encryption",
@@ -208,6 +213,74 @@ class Settings(BaseSettings):
         if isinstance(v, list):
             return v
         raise TypeError(f"CORS_ORIGINS must be str or list, got {type(v)}")
+    
+    @model_validator(mode="after")
+    def validate_production_secrets(self) -> "Settings":
+        """Refuse to boot in production if critical secrets are missing or placeholder.
+
+        This is the last line of defense against a misconfigured deploy. In
+        development and staging we let the app boot with dev defaults so the
+        developer experience stays smooth; in production we fail fast.
+        """
+        if not self.is_production:
+            return self
+
+        errors: list[str] = []
+
+        jwt_val = self.JWT_SECRET.get_secret_value()
+        if jwt_val in _KNOWN_BAD_JWT_SECRETS or jwt_val.startswith("change-me"):
+            errors.append(
+                "JWT_SECRET is a known dev/placeholder value. Generate a real one "
+                "with `openssl rand -hex 32`."
+            )
+
+        s3_val = self.S3_SECRET_KEY.get_secret_value()
+        if s3_val in _KNOWN_BAD_S3_SECRETS:
+            errors.append(
+                "S3_SECRET_KEY is a known dev placeholder. Set a real secret for "
+                "production object storage."
+            )
+
+        if not self.ENCRYPTION_KEY or not self.ENCRYPTION_KEY.get_secret_value():
+            errors.append(
+                "ENCRYPTION_KEY is required in production for field-level encryption "
+                "of PII (bank accounts, Aadhaar hashes). Generate with: "
+                'python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"'
+            )
+
+        if not self.CSRF_SECRET or not self.CSRF_SECRET.get_secret_value():
+            errors.append(
+                "CSRF_SECRET is required in production for double-submit CSRF "
+                "protection. Generate with `openssl rand -hex 32`."
+            )
+
+        if self.GOOGLE_OAUTH_CLIENT_ID and not self.GOOGLE_OAUTH_CLIENT_SECRET:
+            errors.append(
+                "GOOGLE_OAUTH_CLIENT_ID is set but GOOGLE_OAUTH_CLIENT_SECRET is "
+                "missing. Either set the secret or clear the client ID."
+            )
+
+        if not self.DPDP_GRIEVANCE_OFFICER_EMAIL:
+            errors.append(
+                "DPDP_GRIEVANCE_OFFICER_EMAIL is required in production (DPDP Act "
+                "2023, Section 7)."
+            )
+
+        if errors:
+            raise ValueError(
+                "\n\n"
+                "===============================================================\n"
+                "  PRODUCTION CONFIGURATION INCOMPLETE — refusing to boot.\n"
+                "===============================================================\n"
+                "The following secrets are missing or placeholder-valued:\n\n"
+                + "\n".join(f"  - {e}" for e in errors)
+                + "\n\n"
+                "Fix these in your environment / .env and restart.\n"
+                "See docs/security/SECRET_ROTATION_RUNBOOK.md for guidance.\n"
+                "===============================================================\n"
+            )
+
+        return self
 
     @property
     def is_production(self) -> bool:

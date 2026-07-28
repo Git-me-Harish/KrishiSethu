@@ -1,4 +1,15 @@
-"""Payment service — orchestrates Razorpay/UPI, escrow, and refunds."""
+"""Payment service — orchestrates Razorpay/UPI, escrow, and refunds.
+
+FIX (T3): release_escrow now takes a `released_by` User parameter and
+verifies that:
+  1. For SUPPLIER role: released_to_user_id == released_by.id (a supplier
+     can only release escrow TO THEMSELVES, not to an arbitrary UUID)
+  2. The released_to_user_id actually owns an item in the order being
+     released (looked up via the marketplace order items table)
+
+This closes the P0 authorization hole where any farmer could release
+their own escrowed payment to themselves before delivery.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +20,12 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from krishisetu.core.exceptions import NotFoundError, ValidationError, ConflictError
+from krishisetu.core.exceptions import AuthorizationError, NotFoundError, ValidationError, ConflictError
 from krishisetu.core.logging import get_logger
+from krishisetu.domains.identity.models import User, UserRole
 from krishisetu.domains.payment import repository as repo
 from krishisetu.domains.payment.models import PaymentStatus, PaymentType, PaymentProvider
 from krishisetu.domains.payment.schemas import (
@@ -205,13 +218,36 @@ async def release_escrow(
     db: AsyncSession,
     payment_id: UUID,
     released_to_user_id: UUID,
+    *,
+    released_by: User,
 ) -> PaymentResponse:
     """Release escrowed payment to supplier/insurer.
+
+    Authorization (enforced in route via require_role):
+        - UserRole.ADMIN: can release to any legitimate recipient
+        - UserRole.SUPPLIER: can release ONLY to themselves
+
+    Additional checks enforced here:
+        - SUPPLIER: released_to_user_id must equal released_by.id
+        - The released_to_user_id must actually own an item in the order
+          being released (prevents releasing to an arbitrary UUID)
 
     Called when:
     - Marketplace order delivered → release to supplier
     - Insurance claim approved → release payout to farmer
     """
+    # Authorization: supplier can only release to themselves
+    if released_by.role == UserRole.SUPPLIER and released_to_user_id != released_by.id:
+        logger.warning(
+            "payment.escrow_release.forbidden_supplier_to_other",
+            payment_id=str(payment_id),
+            released_by=str(released_by.id),
+            attempted_release_to=str(released_to_user_id),
+        )
+        raise AuthorizationError(
+            "Suppliers can only release escrow to their own account."
+        )
+
     payment = await repo.get_payment_by_id(db, payment_id)
     if not payment:
         raise NotFoundError("Payment", str(payment_id))
@@ -224,16 +260,67 @@ async def release_escrow(
             f"Cannot release payment in '{payment.status}' state. Must be 'captured'."
         )
 
+    if payment.payment_type == PaymentType.MARKETPLACE_ORDER:
+        await _verify_supplier_owns_order_item(
+            db, payment.reference_id, released_to_user_id
+        )
+    # For insurance payouts, the recipient is the farmer (payment.user_id)
+    # — admin-authorized release, no further check needed.
     updated = await repo.release_escrow(db, payment_id, released_to_user_id)
 
     logger.info(
         "payment.escrow_released",
         payment_id=str(payment_id),
         released_to=str(released_to_user_id),
+        released_by=str(released_by.id),
+        released_by_role=released_by.role.value,
         amount=str(payment.amount),
     )
 
     return PaymentResponse.model_validate(updated)
+
+
+async def _verify_supplier_owns_order_item(
+    db: AsyncSession,
+    order_id: UUID | str,
+    supplier_user_id: UUID,
+) -> None:
+    """Verify that the given supplier_user_id owns at least one item in the order.
+
+    Raises AuthorizationError if not. This prevents a supplier from
+    releasing escrow on an order they have no items in.
+    """
+    from krishisetu.domains.marketplace.models import OrderItem
+    from krishisetu.domains.marketplace import repository as mp_repo
+
+    # Look up the supplier profile for this user
+    supplier = await mp_repo.get_supplier_by_user_id(db, supplier_user_id)
+    if not supplier:
+        raise AuthorizationError(
+            "No supplier profile found for the given user ID."
+        )
+
+    # Check if any order item belongs to this supplier
+    # OrderItem has a supplier_id column (set during order creation)
+    stmt = (
+        select(OrderItem.id)
+        .where(
+            OrderItem.order_id == order_id,
+            OrderItem.supplier_id == supplier.id,
+        )
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    if result.first() is None:
+        logger.warning(
+            "payment.escrow_release.supplier_not_on_order",
+            order_id=str(order_id),
+            supplier_user_id=str(supplier_user_id),
+            supplier_id=str(supplier.id),
+        )
+        raise AuthorizationError(
+            "Supplier has no items in this order — cannot release escrow."
+        )
 
 
 async def process_refund(
