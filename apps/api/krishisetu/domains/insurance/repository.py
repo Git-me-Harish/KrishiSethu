@@ -447,7 +447,7 @@ async def list_claims_for_insurer(
         {insurer_clause}
         ORDER BY c.submitted_at ASC
         LIMIT :limit OFFSET :offset
-    """)  # noqa: S608 -- insurer_clause is a fixed fragment; value is bound via params
+    """)
     params: dict[str, Any] = {"limit": page_size, "offset": offset}
     if insurer_name:
         params["insurer_name"] = insurer_name

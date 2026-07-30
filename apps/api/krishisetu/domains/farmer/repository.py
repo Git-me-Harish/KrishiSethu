@@ -450,7 +450,7 @@ async def list_plots_by_district(
         WHERE {' AND '.join(filters)}
         ORDER BY p.created_at DESC
         LIMIT :limit OFFSET :offset
-    """)  # noqa: S608 -- filters are fixed fragments; values are bound via params
+    """)
     result = await db.execute(query, params)
     rows = result.fetchall()
     plots = [_row_to_list_item_dict(row) for row in rows]

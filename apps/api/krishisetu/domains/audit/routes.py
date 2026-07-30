@@ -85,7 +85,7 @@ async def search_audit_logs(
         FROM audit.audit_logs{where_clause}
         ORDER BY occurred_at DESC
         LIMIT :limit OFFSET :offset
-    """)  # noqa: S608
+    """)
 
     count_sql = text(f"SELECT COUNT(*) FROM audit.audit_logs{where_clause}")  # noqa: S608
 

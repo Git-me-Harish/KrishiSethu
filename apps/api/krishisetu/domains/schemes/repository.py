@@ -326,7 +326,7 @@ async def list_applications_for_review(
         {district_clause}
         ORDER BY a.submitted_at ASC
         LIMIT :limit OFFSET :offset
-    """)  # noqa: S608 -- fixed fragments; values are bound via params
+    """)
     result = await db.execute(query, params)
     apps = [_row_to_application_dict(row) for row in result.fetchall()]
     return apps, total

@@ -245,7 +245,7 @@ async def list_reports_for_officer_review(
         {district_clause}
         ORDER BY r.created_at ASC
         LIMIT :limit OFFSET :offset
-    """)  # noqa: S608 -- district_clause is a fixed fragment; values are bound via params
+    """)
     result = await db.execute(query, params)
     reports = [_row_to_officer_list_item_dict(row) for row in result.fetchall()]
     return reports, total

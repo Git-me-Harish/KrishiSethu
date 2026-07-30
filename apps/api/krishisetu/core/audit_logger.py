@@ -213,7 +213,7 @@ async def audit_log(
     if details:
         for k, v in details.items():
             # Best-effort: stringify anything that isn't already a primitive
-            if isinstance(v, (str, int, float, bool, type(None), list, dict)):
+            if isinstance(v, str | int | float | bool | None | list | dict):
                 safe_details[k] = v
             else:
                 try:

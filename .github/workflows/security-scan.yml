@@ -50,7 +50,7 @@ jobs:
           cache-dependency-path: apps/api/pyproject.toml
 
       - name: Install security tools
-        run: pip install bandit pip-audit safety
+        run: pip install bandit bandit-sarif-formatter pip-audit safety
 
       # Bandit must be able to fail the job. The SARIF upload is a separate
       # `if: always()` step so findings still reach code scanning on failure.
