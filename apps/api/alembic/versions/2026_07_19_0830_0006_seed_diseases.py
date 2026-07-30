@@ -1,21 +1,4 @@
-"""Seed disease catalog with 30+ real crop diseases
-
-Populates intelligence.diseases with the most common and economically
-significant crop diseases in India. Each disease includes:
-- Symptoms (textual description for officer/farmer reference)
-- Cause (pathogen or environmental factor)
-- Spread mechanism and favorable conditions
-- Prevention measures
-- Treatment recommendations (via disease_treatments table)
-
-Data sourced from:
-- ICAR (Indian Council of Agricultural Research) publications
-- PlantVillage dataset (https://www.plantvillage.org)
-- University extension publications (PAU, TNAU, UAS)
-- CABI Invasive Species Compendium
-
-NO MOCK DATA — every entry is a real crop disease with verifiable references.
-
+"""
 Revision ID: 0006
 Revises: 0005
 Create Date: 2026-07-19

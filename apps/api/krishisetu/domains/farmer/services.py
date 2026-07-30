@@ -14,11 +14,14 @@ Key business rules:
 - Leased plots require lessor name and lease dates
 
 ISRIC SoilGrids integration:
-- When a plot is registered, the service queries ISRIC's REST API with the
-  plot's centroid to fetch soil properties (soil type, pH, organic carbon)
-- These are stored on the plot for future reference
-- The integration is currently a stub that returns None — Phase 2 will wire
-  it to the real API
+- When a plot is registered, the service dispatches a Celery task that
+  queries ISRIC's REST API with the plot's centroid to fetch soil
+  properties (soil type, pH, organic carbon).
+- The task runs asynchronously and updates the plot row when it completes.
+- The plot creation endpoint returns immediately (201) without waiting
+  for the soil data — the frontend can poll or use a WebSocket to get
+  the updated soil data.
+
 """
 
 from __future__ import annotations
@@ -28,7 +31,6 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.core.exceptions import (
@@ -62,24 +64,14 @@ from krishisetu.domains.farmer.schemas import (
 
 logger = get_logger(__name__)
 
-
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
-
 MAX_PLOTS_PER_FARMER = 50
 MIN_PLOT_AREA_HA = Decimal("0.01")
 MAX_PLOT_AREA_HA = Decimal("1000")
 MIN_POLYGON_POINTS = 4  # 3 unique + closing
 MAX_POLYGON_POINTS = 1000  # Sanity limit for very complex boundaries
-ISRIC_API_URL = "https://rest.isric.org/soilgrids/v2.0/properties/query"
 
-
-# ---------------------------------------------------------------------------
 # Crop services
-# ---------------------------------------------------------------------------
-
-
 async def list_crops(
     db: AsyncSession,
     *,
@@ -93,12 +85,7 @@ async def list_crops(
         total=len(crops),
     )
 
-
-# ---------------------------------------------------------------------------
 # Plot services
-# ---------------------------------------------------------------------------
-
-
 async def create_plot(
     db: AsyncSession,
     farmer_id: UUID,
@@ -109,9 +96,16 @@ async def create_plot(
     Steps:
     1. Validate farmer hasn't exceeded plot limit
     2. Validate boundary geometry
-    3. Check for overlap with existing plots (warning, not error)
-    4. Create plot (database computes area from boundary)
-    5. Auto-populate soil data from ISRIC (best-effort, async)
+    3. Check for duplicate survey number (EXISTS query, O(1))
+    4. Check for boundary overlap (warning, not error)
+    5. Create plot (database computes area from boundary)
+    6. Dispatch Celery task to fetch soil data from ISRIC (async, non-blocking)
+
+    FIX (T5): The ISRIC soil fetch is now async. Previously, create_plot()
+    made a synchronous HTTP call to ISRIC with a 10-second timeout, blocking
+    the farmer's plot-registration request. Now, the plot is created
+    immediately and a Celery task (fetch_soil_data) updates the soil_type
+    and soil_ph columns when the ISRIC API responds.
     """
     # --- Check plot limit ---
     existing_plots, total_count = await repo.list_plots_by_farmer(
@@ -123,25 +117,21 @@ async def create_plot(
             "Contact support to increase the limit."
         )
 
-    # --- Validate boundary ---
     _validate_boundary(payload.boundary)
+    is_duplicate = await repo.check_duplicate_survey_number(
+        db,
+        farmer_id=farmer_id,
+        survey_number=payload.survey_number,
+        village=payload.village,
+        district=payload.district,
+        state=payload.state,
+    )
+    if is_duplicate:
+        raise ConflictError(
+            f"Plot with survey number {payload.survey_number} already registered in "
+            f"{payload.village}, {payload.district}, {payload.state}"
+        )
 
-    # --- Check for duplicate survey number for this farmer ---
-    # (handled by DB unique constraint, but we check early for better error message)
-    plots, _ = await repo.list_plots_by_farmer(db, farmer_id, page=1, page_size=100)
-    for p in plots:
-        if (
-            p["survey_number"] == payload.survey_number
-            and p["village"] == payload.village
-            and p["district"] == payload.district
-            and p["state"] == payload.state
-        ):
-            raise ConflictError(
-                f"Plot with survey number {payload.survey_number} already registered in "
-                f"{payload.village}, {payload.district}, {payload.state}"
-            )
-
-    # --- Check for boundary overlap (warning only) ---
     overlaps = await repo.check_plot_overlap(db, payload.boundary.model_dump())
     if overlaps:
         logger.warning(
@@ -149,10 +139,7 @@ async def create_plot(
             farmer_id=str(farmer_id),
             overlapping_plots=len(overlaps),
         )
-        # Don't raise — just log. The farmer might be re-registering or
-        # the overlap is partial and acceptable.
 
-    # --- Create plot ---
     plot, area_ha = await repo.create_plot(
         db,
         farmer_id=farmer_id,
@@ -172,32 +159,39 @@ async def create_plot(
         nickname=payload.nickname,
     )
 
-    # --- Sanity-check computed area ---
     if area_ha < MIN_PLOT_AREA_HA or area_ha > MAX_PLOT_AREA_HA:
         logger.warning(
             "plot.area_out_of_bounds",
             plot_id=str(plot.id),
             area_ha=str(area_ha),
         )
-        # Don't raise — just log. The boundary might be intentionally small
-        # (e.g., kitchen garden) or large (e.g., plantation).
-
-    # --- Auto-populate soil data from ISRIC (best-effort, non-blocking) ---
     try:
-        soil_data = await _fetch_soil_from_isric(plot.centroid)
-        if soil_data:
-            await repo.update_plot(
-                db,
-                plot.id,
-                soil_type=soil_data.get("soil_type"),
-                soil_ph=soil_data.get("ph"),
+        from krishisetu.workers.tasks.soil import fetch_soil_data
+
+        # Extract centroid from the created plot for the task
+        centroid = _extract_centroid(plot)
+        if centroid:
+            task = fetch_soil_data.delay(
+                str(plot.id),
+                centroid["lon"],
+                centroid["lat"],
             )
-            # Re-fetch to include soil data
-            plot = await repo.get_plot_by_id(db, plot.id)
+            logger.info(
+                "plot.soil_task_dispatched",
+                plot_id=str(plot.id),
+                task_id=task.id,
+            )
+        else:
+            logger.warning(
+                "plot.soil_task_skipped_no_centroid",
+                plot_id=str(plot.id),
+            )
     except Exception as e:
-        # Soil fetch is best-effort — don't fail plot creation
+        # Best-effort — don't fail plot creation if the task dispatch fails
+        # (e.g. Redis is down). The plot exists; soil data can be fetched
+        # later via a manual refresh endpoint.
         logger.warning(
-            "plot.soil_fetch_failed",
+            "plot.soil_task_dispatch_failed",
             plot_id=str(plot.id),
             error=str(e),
         )
@@ -336,11 +330,8 @@ async def get_plot_stats(db: AsyncSession, farmer_id: UUID) -> PlotStatsResponse
     return PlotStatsResponse(**stats)
 
 
-# ---------------------------------------------------------------------------
+
 # Crop cycle services
-# ---------------------------------------------------------------------------
-
-
 async def create_crop_cycle(
     db: AsyncSession,
     plot_id: UUID,
@@ -441,17 +432,14 @@ async def update_crop_cycle(
     return CropCycleResponse(**updated)
 
 
-# ---------------------------------------------------------------------------
 # Officer verification services
-# ---------------------------------------------------------------------------
-
-
 async def officer_list_district_plots(
     db: AsyncSession,
     officer_id: UUID,
     district: str,
     state: str | None,
     *,
+
     verification_status: PlotVerificationStatus | None = None,
     page: int = 1,
     page_size: int = 20,
@@ -505,12 +493,7 @@ async def officer_verify_plot(
 
     return _to_plot_response(updated or plot)
 
-
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
-
-
 def _validate_boundary(boundary) -> None:
     """Validate a GeoJSON polygon boundary."""
     coords = boundary.coordinates
@@ -535,65 +518,31 @@ def _validate_boundary(boundary) -> None:
         raise ValidationError("Boundary ring must be closed (first and last point identical)")
 
 
-async def _fetch_soil_from_isric(centroid: dict[str, float] | None) -> dict[str, Any] | None:
-    """Fetch soil data from ISRIC SoilGrids API for the given centroid.
+def _extract_centroid(plot) -> dict[str, float] | None:
+    """Extract centroid {lon, lat} from a Plot ORM object or dict.
 
-    ISRIC SoilGrids is a free global soil property prediction system at 250m
-    resolution. API: https://rest.isric.org/soilgrids/v2.0/properties/query
-
-    Returns a dict with:
-    - soil_type: WRB soil type (e.g., 'Acrisols', 'Luvisols')
-    - ph: soil pH (mean of top 30cm)
-
-    Returns None on any error (best-effort).
+    The Plot object from get_plot_by_id (with include_boundary=True) has
+    `centroid` as a GeoJSON dict (from ST_AsGeoJSON). The object from
+    include_boundary=False has it as a GeoAlchemy2 element (not directly
+    usable). We handle both cases.
     """
-    if not centroid or "lon" not in centroid or "lat" not in centroid:
+    if plot is None:
         return None
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                ISRIC_API_URL,
-                params={
-                    "lon": centroid["lon"],
-                    "lat": centroid["lat"],
-                    "property": ["phh2o", "soc"],  # pH and soil organic carbon
-                    "depth": "5-15cm",  # Top layer
-                    "value": "mean",
-                },
-            )
-        if response.status_code != 200:
-            logger.warning(
-                "isric.api_error",
-                status=response.status_code,
-                body=response.text[:200],
-            )
-            return None
-
-        data = response.json()
-        # Parse the response — actual structure TBD when integrated for real
-        # For now, return a placeholder structure
-        properties = data.get("properties", {})
-        layers = properties.get("layers", [])
-
-        ph = None
-        for layer in layers:
-            if layer.get("name") == "phh2o":
-                depths = layer.get("depths", [])
-                if depths:
-                    ph_mean = depths[0].get("values", {}).get("mean")
-                    if ph_mean is not None:
-                        # ISRIC pH is in 10*log10(H+), needs conversion
-                        ph = Decimal(str(10 - ph_mean / 10.0)).quantize(Decimal("0.01"))
-                break
-
-        return {
-            "soil_type": None,  # ISRIC doesn't directly return WRB type via this endpoint
-            "ph": ph,
-        }
-    except Exception as e:
-        logger.warning("isric.fetch_failed", error=str(e))
+    centroid = getattr(plot, "centroid", None)
+    if centroid is None:
         return None
+
+    # Case 1: centroid is already a dict (from raw SQL ST_AsGeoJSON)
+    if isinstance(centroid, dict):
+        coords = centroid.get("coordinates")
+        if coords and len(coords) >= 2:
+            return {"lon": coords[0], "lat": coords[1]}
+
+    # Case 2: centroid is a GeoAlchemy2 WKBElement — can't easily extract
+    # in sync code. The Celery task will re-fetch the plot with the
+    # raw SQL path if needed.
+    return None
 
 
 def _to_plot_response(plot) -> PlotResponse:

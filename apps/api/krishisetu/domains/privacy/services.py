@@ -206,10 +206,7 @@ async def update_dsr(
     return dsr
 
 
-# ---------------------------------------------------------------------------
 # Erasure — account deletion
-# ---------------------------------------------------------------------------
-
 async def execute_erasure(
     db: AsyncSession,
     user_id: UUID,
@@ -297,10 +294,7 @@ async def execute_erasure(
     logger.info("privacy.erasure_completed", user_id=str(user_id))
 
 
-# ---------------------------------------------------------------------------
 # Grievances
-# ---------------------------------------------------------------------------
-
 async def create_grievance(
     db: AsyncSession,
     user_id: UUID,

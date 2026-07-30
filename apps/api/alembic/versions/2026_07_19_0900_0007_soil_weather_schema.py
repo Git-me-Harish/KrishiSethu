@@ -1,16 +1,4 @@
-"""Create soil & weather tables: soil_tests, weather_observations, weather_forecasts, weather_alerts
-
-Creates the following tables in the `intelligence` schema (already exists from
-migration 0001):
-- intelligence.soil_tests             (per-plot soil test results, 4 sources)
-- intelligence.weather_observations   (district-level hourly observations, partitioned by month)
-- intelligence.weather_forecasts      (7-day daily forecasts per district)
-- intelligence.weather_alerts         (extreme weather alerts)
-
-Partitioning:
-- weather_observations is RANGE-partitioned by observed_at (monthly)
-- weather_forecasts is RANGE-partitioned by forecast_date (monthly)
-This enables efficient time-series queries and easy archival of old data.
+"""
 
 Revision ID: 0007
 Revises: 0006

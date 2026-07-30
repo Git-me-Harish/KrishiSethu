@@ -1,12 +1,4 @@
-"""Create NDVI tables: ndvi_observations (partitioned), ndvi_anomaly_alerts
-
-Creates:
-- intelligence.ndvi_observations (RANGE-partitioned by observed_at, monthly)
-- intelligence.ndvi_anomaly_alerts (per-plot anomaly alerts)
-
-ndvi_observations stores summary statistics per (plot, observation_time).
-The full NDVI raster is stored in S3 (raster_url) and served via pre-signed URLs.
-With 1M plots × weekly observations × 2 years = ~100M rows, partitioning is essential.
+"""
 
 Revision ID: 0008
 Revises: 0007

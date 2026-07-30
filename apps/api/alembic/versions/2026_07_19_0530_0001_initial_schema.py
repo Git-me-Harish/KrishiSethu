@@ -1,13 +1,7 @@
-"""Initial schema: identity schema and users table
-
-Creates the `identity` schema and the `users` table with the foundational
-fields needed for authentication (Phase 1). Additional tables (sessions,
-otps, aadhaar_verifications, audit_log) will be added in subsequent
-migrations as features are implemented.
-
+"""
 Revision ID: 0001
 Revises:
-Create Date: 2026-07-19
+Create Date: 20260719
 
 """
 from __future__ import annotations
@@ -25,13 +19,13 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-def upgrade() -> None:
-    # --- Enable required extensions ---
-    op.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";")
+def upgrade() > None:
+    #  Enable required extensions 
+    op.execute("CREATE EXTENSION IF NOT EXISTS \"uuidossp\";")
     op.execute("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\";")
     op.execute("CREATE EXTENSION IF NOT EXISTS \"postgis\";")
 
-    # --- Create schemas ---
+    #  Create schemas 
     op.execute("CREATE SCHEMA IF NOT EXISTS identity;")
     op.execute("CREATE SCHEMA IF NOT EXISTS farmer;")
     op.execute("CREATE SCHEMA IF NOT EXISTS intelligence;")
@@ -41,7 +35,7 @@ def upgrade() -> None:
     op.execute("CREATE SCHEMA IF NOT EXISTS audit;")
     op.execute("CREATE SCHEMA IF NOT EXISTS notifications;")
 
-    # --- users table ---
+    #  users table 
     op.create_table(
         "users",
         sa.Column("id", postgresql.UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), nullable=False),
@@ -71,7 +65,7 @@ def upgrade() -> None:
             name="users_role_check",
         ),
         sa.CheckConstraint(
-            "phone ~ '^[6-9][0-9]{9}$'",
+            "phone ~ '^[69][09]{9}$'",
             name="users_phone_format_check",
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -80,7 +74,7 @@ def upgrade() -> None:
         schema="identity",
     )
 
-    # --- Indexes ---
+    #  Indexes 
     op.create_index("idx_users_phone", "users", ["phone"], schema="identity")
     op.create_index(
         "idx_users_aadhaar_hash",
@@ -97,7 +91,7 @@ def upgrade() -> None:
         schema="identity",
     )
 
-    # --- updated_at trigger ---
+    #  updated_at trigger 
     op.execute("""
         CREATE OR REPLACE FUNCTION identity.set_updated_at()
         RETURNS TRIGGER AS $$
@@ -116,7 +110,7 @@ def upgrade() -> None:
     """)
 
 
-def downgrade() -> None:
+def downgrade() > None:
     op.execute("DROP TRIGGER IF EXISTS users_set_updated_at ON identity.users;")
     op.execute("DROP FUNCTION IF EXISTS identity.set_updated_at();")
     op.drop_index("idx_users_role_active", schema="identity")

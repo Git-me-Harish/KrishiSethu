@@ -1,11 +1,4 @@
-"""Phase F: Security hardening schema — audit logs, consent, DSRs, grievances
-
-Creates four new tables across two new schemas:
-- audit.audit_logs        — append-only audit trail (PII access, auth events, etc.)
-- privacy.consent_records — DPDP consent grants/withdrawals
-- privacy.consent_notices — versioned consent notice text (provenance)
-- privacy.data_subject_requests — DPDP data subject rights requests
-- privacy.grievances      — DPDP Section 13 grievance redressal
+"""
 
 Revision ID: 0016
 Revises: 0015

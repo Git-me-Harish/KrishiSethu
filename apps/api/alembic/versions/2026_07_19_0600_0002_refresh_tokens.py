@@ -1,11 +1,4 @@
-"""Add refresh_tokens table for JWT rotation and revocation
-
-Creates the `identity.refresh_tokens` table that stores hashed refresh tokens
-with their jti (JWT ID) for rotation and revocation tracking. Also adds the
-foreign key constraint from refresh_tokens.user_id to identity.users.id
-(which was intentionally omitted in migration 0001 to keep that migration
-focused on the users table).
-
+"""
 Revision ID: 0002
 Revises: 0001
 Create Date: 2026-07-19

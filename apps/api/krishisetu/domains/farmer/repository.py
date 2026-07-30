@@ -36,12 +36,6 @@ from krishisetu.domains.farmer.models import (
     PlotVerificationStatus,
 )
 
-
-# ---------------------------------------------------------------------------
-# Helpers: GeoJSON <-> WKT conversion
-# ---------------------------------------------------------------------------
-
-
 def geojson_to_wkt(geojson: dict[str, Any]) -> str:
     """Convert GeoJSON Polygon dict to WKT (Well-Known Text).
 
@@ -147,12 +141,6 @@ def _wkt_to_geojson(wkt: str) -> dict[str, Any]:
 
     return {"type": "Polygon", "coordinates": geojson_rings}
 
-
-# ---------------------------------------------------------------------------
-# Crop queries (master data)
-# ---------------------------------------------------------------------------
-
-
 async def list_crops(
     db: AsyncSession,
     *,
@@ -181,12 +169,6 @@ async def get_crop_by_slug(db: AsyncSession, slug: str) -> Crop | None:
     """Fetch a crop by slug."""
     result = await db.execute(select(Crop).where(Crop.slug == slug))
     return result.scalar_one_or_none()
-
-
-# ---------------------------------------------------------------------------
-# Plot queries
-# ---------------------------------------------------------------------------
-
 
 async def create_plot(
     db: AsyncSession,
@@ -546,12 +528,6 @@ async def check_plot_overlap(
     result = await db.execute(query, params)
     return [row[0] for row in result.fetchall()]
 
-
-# ---------------------------------------------------------------------------
-# Plot boundary history
-# ---------------------------------------------------------------------------
-
-
 async def create_boundary_snapshot(
     db: AsyncSession,
     *,
@@ -596,12 +572,6 @@ async def list_boundary_history(
     )
     return list(result.scalars().all())
 
-
-# ---------------------------------------------------------------------------
-# Officer verification
-# ---------------------------------------------------------------------------
-
-
 async def verify_plot(
     db: AsyncSession,
     plot_id: UUID,
@@ -622,12 +592,6 @@ async def verify_plot(
     )
     await db.flush()
     return await get_plot_by_id(db, plot_id, include_boundary=False)
-
-
-# ---------------------------------------------------------------------------
-# Plot statistics
-# ---------------------------------------------------------------------------
-
 
 async def get_plot_stats(db: AsyncSession, farmer_id: UUID) -> dict[str, Any]:
     """Get summary statistics for a farmer's plots."""
@@ -676,12 +640,6 @@ async def get_plot_stats(db: AsyncSession, farmer_id: UUID) -> dict[str, Any]:
         "by_district": by_district,
         "current_season_crops": current_crops,
     }
-
-
-# ---------------------------------------------------------------------------
-# Crop cycle queries
-# ---------------------------------------------------------------------------
-
 
 async def create_crop_cycle(
     db: AsyncSession,
@@ -792,11 +750,6 @@ async def check_active_crop_cycle(
     """)
     result = await db.execute(query, {"plot_id": plot_id})
     return result.scalar()
-
-
-# ---------------------------------------------------------------------------
-# Row mappers (private)
-# ---------------------------------------------------------------------------
 
 
 def _row_to_plot_dict(row: Any) -> dict[str, Any]:

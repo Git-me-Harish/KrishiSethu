@@ -1,10 +1,4 @@
-"""Create insurance schema: products, policies, claims, claim_evidence
-
-Creates 4 tables in the `insurance` schema:
-- insurance.insurance_products  (PMFBY and state scheme catalog)
-- insurance.insurance_policies  (farmer's purchased policies)
-- insurance.insurance_claims    (filed claims with status workflow)
-- insurance.claim_evidence      (auto-attached + manual evidence)
+"""
 
 Revision ID: 0009
 Revises: 0008

@@ -1,21 +1,4 @@
-"""Seed crops master data
-
-Populates farmer.crops with the 30 most important crops grown in India.
-Data is sourced from ICAR (Indian Council of Agricultural Research) and
-the Ministry of Agriculture & Farmers Welfare.
-
-Categories:
-- Cereals: rice, wheat, maize, jowar, bajra, ragi, barley
-- Pulses: tur (arhar), gram, moong, urad, lentil, peas
-- Oilseeds: groundnut, soybean, mustard, sunflower, sesame
-- Fibre: cotton, jute
-- Sugar: sugarcane
-- Plantation: coconut, tea, coffee, rubber
-- Horticulture: banana, mango, tomato, onion, potato
-- Spices: chilli, turmeric
-
-No mock data — every entry is a real crop with verifiable ICAR data.
-
+"""
 Revision ID: 0004
 Revises: 0003
 Create Date: 2026-07-19

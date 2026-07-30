@@ -17,18 +17,38 @@ with a test OTP visible in the API logs (same pattern as the SMS gateway).
 
 Production setup:
 1. Register at https://uidai.gov.in/developers/
-2. Get API key and encrypting public key
+2. Get API key and the UIDAI RSA-2048 public key certificate (.pem file)
 3. Set UIDAI_API_KEY and UIDAI_API_URL in .env
-4. The client automatically switches from synthetic to live mode
+4. Set the UIDAI public key via the UIDAI_PUBLIC_KEY_PEM env var (or mount
+   the .pem file and set UIDAI_PUBLIC_KEY_PATH)
+5. The client automatically switches from synthetic to live mode
+
+FIX (T4): the previous _encrypt_aadhaar() returned
+`f"encrypted_{sha256(aadhaar)[:32]}"` — a deterministic, reversible-by-
+construction string that provided ZERO confidentiality. The class docstring
+claimed "RSA-2048 encryption with UIDAI's public key" but the code did
+not implement it. In production with UIDAI_API_KEY set, the live code path
+would have sent Aadhaar numbers to UIDAI in this fake-encrypted format.
+
+The new implementation:
+  - In dev (no UIDAI_API_KEY): uses the synthetic mode, _encrypt_aadhaar
+    returns a deterministic placeholder (acceptable — no real PII leaves
+    the server).
+  - In production (UIDAI_API_KEY set): REQUIRES UIDAI_PUBLIC_KEY_PEM (or
+    UIDAI_PUBLIC_KEY_PATH) to be configured. If missing, the client
+    hard-fails at startup with a clear error message. If configured,
+    performs real RSA-2048 PKCS#1 v1.5 encryption and returns base64.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from pathlib import Path
 
 import httpx
 
@@ -39,12 +59,7 @@ from krishisetu.core.security import validate_aadhaar
 
 logger = get_logger(__name__)
 
-
-# ---------------------------------------------------------------------------
 # Data classes
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class AadhaarOTPSent:
     """Response from Aadhaar OTP request."""
@@ -69,11 +84,74 @@ class AadhaarVerificationResult:
     raw_response: dict[str, Any] | None = None
 
 
-# ---------------------------------------------------------------------------
+
+# UIDAI public-key loader
+def _load_uidai_public_key() -> Any:
+    """Load the UIDAI RSA-2048 public key from configuration.
+
+    Sources (in priority order):
+      1. UIDAI_PUBLIC_KEY_PEM env var — the PEM string directly
+      2. UIDAI_PUBLIC_KEY_PATH env var — path to a .pem file on disk
+
+    Returns:
+        The loaded RSA public key object (cryptography.hazmat.backends.openssl.rsa._RSAPublicKey)
+
+    Raises:
+        RuntimeError: if neither env var is set, or the PEM is malformed.
+    """
+    from cryptography.hazmat.primitives import serialization
+
+    pem_bytes: bytes | None = None
+
+    # Source 1: env var with the PEM content directly
+    pem_str = getattr(settings(), "UIDAI_PUBLIC_KEY_PEM", None)
+    if pem_str:
+        pem_bytes = pem_str.encode() if isinstance(pem_str, str) else pem_str
+
+    # Source 2: path to a .pem file
+    if pem_bytes is None:
+        pem_path = getattr(settings(), "UIDAI_PUBLIC_KEY_PATH", None)
+        if pem_path:
+            path = Path(pem_path)
+            if not path.is_file():
+                raise RuntimeError(
+                    f"UIDAI_PUBLIC_KEY_PATH points to a non-existent file: {pem_path}"
+                )
+            pem_bytes = path.read_bytes()
+
+    if pem_bytes is None:
+        raise RuntimeError(
+            "UIDAI public key not configured. Set either UIDAI_PUBLIC_KEY_PEM "
+            "(the PEM string) or UIDAI_PUBLIC_KEY_PATH (path to a .pem file) "
+            "in the environment. Without this, Aadhaar numbers cannot be "
+            "RSA-encrypted before being sent to UIDAI, which is a security "
+            "requirement (Aadhaar Act 2016)."
+        )
+
+    try:
+        return serialization.load_pem_public_key(pem_bytes)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to parse UIDAI public key PEM: {e}. The PEM must be a "
+            f"valid RSA-2048 public key in PKCS#8 or PKCS#1 format."
+        ) from e
+
+
+# Cache the loaded key — loading is expensive (PEM parse + ASN.1 decode).
+_uidai_public_key_cache: Any | None = None
+_uidai_public_key_cache_loaded: bool = False
+
+
+def _get_uidai_public_key() -> Any:
+    """Return the cached UIDAI public key, loading it on first access."""
+    global _uidai_public_key_cache, _uidai_public_key_cache_loaded
+    if not _uidai_public_key_cache_loaded:
+        _uidai_public_key_cache = _load_uidai_public_key()
+        _uidai_public_key_cache_loaded = True
+    return _uidai_public_key_cache
+
+
 # UIDAI API client
-# ---------------------------------------------------------------------------
-
-
 class UIDAIClient:
     """UIDAI Aadhaar e-KYC API client.
 
@@ -96,6 +174,19 @@ class UIDAIClient:
         self.api_key = settings().UIDAI_API_KEY
         self.api_url = str(settings().UIDAI_API_URL) if settings().UIDAI_API_URL else "https://api.uidai.gov.in"
         self.timeout = 15.0
+
+        # If we're in live mode, eagerly load the public key so a missing /
+        # malformed key fails at startup (fast-fail) rather than at the first
+        # _encrypt_aadhaar() call (which would be mid-user-request).
+        if self.is_live:
+            try:
+                _get_uidai_public_key()
+                logger.info("uidai.public_key_loaded")
+            except RuntimeError as e:
+                # Re-raise — the app should fail to start in production
+                # without a valid UIDAI public key.
+                logger.error("uidai.public_key_load_failed", error=str(e))
+                raise
 
     @property
     def is_live(self) -> bool:
@@ -153,17 +244,10 @@ class UIDAIClient:
             return await self._verify_otp_live(validated, otp, transaction_id)
         return await self._verify_otp_synthetic(validated, otp, transaction_id)
 
-    # -----------------------------------------------------------------------
     # Live API calls (production)
-    # -----------------------------------------------------------------------
-
     async def _send_otp_live(self, aadhaar: str) -> AadhaarOTPSent:
         """Send real OTP request to UIDAI API."""
         transaction_id = secrets.token_hex(16)
-
-        # Encrypt Aadhaar number with UIDAI public key
-        # In production, this uses RSA-2048 encryption with UIDAI's public key
-        # The encrypted payload is sent to UIDAI
         encrypted_aadhaar = self._encrypt_aadhaar(aadhaar)
 
         payload = {
@@ -199,7 +283,10 @@ class UIDAIClient:
 
         data = response.json()
 
-        # Store transaction ID in Redis for verification step
+        # Store transaction ID in Redis for verification step.
+        # We store the validated Aadhaar so the verify step can re-encrypt it
+        # without the user re-entering it. This is acceptable because Redis
+        # is in-memory and the TTL is short (10 minutes).
         redis = await get_redis()
         await redis.setex(
             f"uidai:txn:{transaction_id}",
@@ -240,7 +327,7 @@ class UIDAIClient:
         await redis.incr(attempts_key)
         await redis.expire(attempts_key, self.OTP_TTL_SECONDS)
 
-        # Encrypt both Aadhaar and OTP
+        # Encrypt both Aadhaar and OTP (RSA-2048)
         encrypted_aadhaar = self._encrypt_aadhaar(aadhaar)
         encrypted_otp = self._encrypt_otp(otp)
 
@@ -305,10 +392,8 @@ class UIDAIClient:
                 raw_response=data,
             )
 
-    # -----------------------------------------------------------------------
+    
     # Synthetic mode (development)
-    # -----------------------------------------------------------------------
-
     async def _send_otp_synthetic(self, aadhaar: str) -> AadhaarOTPSent:
         """Simulate Aadhaar OTP in development mode.
 
@@ -403,36 +488,49 @@ class UIDAIClient:
                 district=None,
             )
 
-    # -----------------------------------------------------------------------
-    # Encryption helpers
-    # -----------------------------------------------------------------------
-
+    
+    # Encryption helpers — REAL RSA-2048
     def _encrypt_aadhaar(self, aadhaar: str) -> str:
-        """Encrypt Aadhaar number with UIDAI public key.
+        """Encrypt Aadhaar number with UIDAI RSA-2048 public key.
 
-        In production, this uses RSA-2048 encryption with UIDAI's public key
-        (downloaded from UIDAI developer portal). The encrypted payload is
-        base64-encoded.
+        FIX (T4): real RSA-2048 PKCS#1 v1.5 encryption, replacing the
+        previous `f"encrypted_{sha256(aadhaar)[:32]}"` placeholder.
 
-        For now, returns a placeholder — real implementation requires the
-        UIDAI public key certificate.
+        In dev mode (is_live=False), the synthetic code path is used and
+        this method is never called — so the placeholder behavior is
+        preserved for dev without any security implication.
+
+        In production (is_live=True), this method:
+          1. Loads the UIDAI public key (cached after first load)
+          2. Encrypts the Aadhaar number with RSA-2048 PKCS#1 v1.5
+          3. Returns the base64-encoded ciphertext
+
+        The public key MUST be configured via UIDAI_PUBLIC_KEY_PEM or
+        UIDAI_PUBLIC_KEY_PATH env vars. If missing, _get_uidai_public_key()
+        raises RuntimeError, which propagates up and fails the user's
+        request with a clear error message. The UIDAIClient constructor
+        also eagerly calls _get_uidai_public_key() in live mode so the
+        app fails fast at startup if the key is missing.
         """
-        # TODO: Implement real RSA encryption when UIDAI public key is available
-        # from cryptography.hazmat.primitives.asymmetric import padding
-        # from cryptography.hazmat.primitives import hashes, serialization
-        # public_key = serialization.load_pem_public_key(uidai_public_key_pem)
-        # encrypted = public_key.encrypt(aadhaar.encode(), padding.PKCS1v15())
-        # return base64.b64encode(encrypted).decode()
-        return f"encrypted_{hashlib.sha256(aadhaar.encode()).hexdigest()[:32]}"
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        public_key = _get_uidai_public_key()
+
+        # RSA-2048 PKCS#1 v1.5 is the padding UIDAI's API expects
+        # (per their developer documentation). OAEP is more modern but
+        # UIDAI's API does not support it.
+        ciphertext = public_key.encrypt(
+            aadhaar.encode("utf-8"),
+            padding.PKCS1v15(),
+        )
+        return base64.b64encode(ciphertext).decode("ascii")
 
     def _encrypt_otp(self, otp: str) -> str:
-        """Encrypt OTP with UIDAI public key."""
+        """Encrypt OTP with UIDAI RSA-2048 public key."""
+        # Same encryption as Aadhaar — UIDAI uses the same key for both.
         return self._encrypt_aadhaar(otp)
 
-    # -----------------------------------------------------------------------
     # Rate limiting
-    # -----------------------------------------------------------------------
-
     async def _check_rate_limits(self, aadhaar: str) -> None:
         """Check UIDAI rate limits per Aadhaar number."""
         from krishisetu.core.exceptions import RateLimitExceededError
@@ -464,15 +562,18 @@ class UIDAIClient:
         pipe.set(cooldown_key, "1", ex=self.OTP_COOLDOWN_SECONDS)
         await pipe.execute()
 
-
-# ---------------------------------------------------------------------------
 # Singleton
-# ---------------------------------------------------------------------------
-
 _uidai_client: UIDAIClient | None = None
 
 
 def get_uidai_client() -> UIDAIClient:
+    """Return the singleton UIDAIClient.
+
+    NOTE: in production, the constructor eagerly loads the UIDAI public key
+    and will raise RuntimeError if it's not configured. This means the first
+    call to get_uidai_client() (typically at import time of the first route
+    that uses it) will fail loud and early.
+    """
     global _uidai_client
     if _uidai_client is None:
         _uidai_client = UIDAIClient()

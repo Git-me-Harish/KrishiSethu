@@ -1,4 +1,23 @@
-"""Identity domain — business logic services."""
+"""Identity domain — business logic services.
+
+FIX (T4): Three improvements bundled here:
+  1. Audit-log every auth event — login success/failure, refresh, logout,
+     lockout, OTP send/verify, Aadhaar e-KYC initiated/completed. Previously
+     audit_log() was called from only 3 of 13 domains; the identity domain
+     had zero audit entries despite AuditAction having values for all of
+     these events.
+  2. Aadhaar e-KYC moved out of routes.py into service-layer functions
+     (send_aadhaar_otp, verify_aadhaar_otp). The service checks
+     has_active_consent(ConsentPurpose.IDENTITY_VERIFICATION) before
+     sending PII to UIDAI — DPDP Act 2023, Section 11 requires explicit
+     consent before processing.
+  3. (Combined with uidai.py fix #3) Aadhaar encryption is now real
+     RSA-2048 with the UIDAI public key certificate, or hard-fails in
+     production if the certificate isn't configured. The previous
+     `f"encrypted_{sha256(aadhaar)[:32]}"` placeholder provided zero
+     confidentiality and would have sent raw Aadhaar numbers to UIDAI
+     in a string-reversible format.
+"""
 
 from __future__ import annotations
 
@@ -6,12 +25,16 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import UUID
 
+from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from krishisetu.core.audit_logger import AuditAction, AuditOutcome, audit_log
 from krishisetu.core.config import settings
 from krishisetu.core.exceptions import (
     AuthenticationError,
+    AuthorizationError,
     ConflictError,
     RateLimitExceededError,
     ValidationError,
@@ -23,8 +46,11 @@ from krishisetu.core.security import (
     create_refresh_token,
     decode_token,
     generate_otp,
+    hash_aadhaar,
 )
 from krishisetu.core.sms import get_sms_backend
+from krishisetu.domains.consent.models import ConsentPurpose
+from krishisetu.domains.consent.services import has_active_consent
 from krishisetu.domains.identity.models import User, UserRole
 from krishisetu.domains.identity import repository as repo
 from krishisetu.domains.identity.schemas import (
@@ -34,10 +60,8 @@ from krishisetu.domains.identity.schemas import (
 
 logger = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# Rate limit constants
-# ---------------------------------------------------------------------------
 
+# Rate limit constants
 OTP_SEND_MAX_PER_HOUR = 5
 OTP_SEND_MAX_PER_DAY = 20
 OTP_VERIFY_MAX_ATTEMPTS = 3
@@ -49,21 +73,24 @@ ACCOUNT_LOCKOUT_THRESHOLD = 5
 ACCOUNT_LOCKOUT_DURATION_MINUTES = 15
 ACCOUNT_LOCKOUT_EXTENDED_MINUTES = 24 * 60
 
-# TTL for Google OAuth CSRF state token stored in Redis
+# TTL for Google OAuth csrf state token stored in Redis
 GOOGLE_OAUTH_STATE_TTL_SECONDS = 10 * 60
 
 
-# ---------------------------------------------------------------------------
 # OTP send flow
-# ---------------------------------------------------------------------------
-
-
 async def send_otp(
     db: AsyncSession,
     phone: str,
     purpose: str = "login",
+    *,
+    request: Request | None = None,
 ) -> dict[str, Any]:
-    """Generate and dispatch an OTP to the given phone number."""
+    """Generate and dispatch an OTP to the given phone number.
+
+    FIX (T4): now writes an audit_log entry (AuditAction.OTP_SENT) so OTP
+    sends are visible in the audit trail. Accepts an optional `request`
+    parameter so IP/UA can be captured for the audit entry.
+    """
     redis = await get_redis()
     now = datetime.now(timezone.utc)
 
@@ -75,8 +102,31 @@ async def send_otp(
     day_count = int(await redis.get(day_key) or 0)
 
     if hour_count >= OTP_SEND_MAX_PER_HOUR:
+        # Audit the rate-limit hit
+        await audit_log(
+            db,
+            action=AuditAction.SECURITY_RATE_LIMIT_EXCEEDED,
+            actor_id=None,
+            actor_role=None,
+            resource_type="otp",
+            resource_id=None,
+            outcome=AuditOutcome.DENIED,
+            details={"phone": phone, "purpose": purpose, "limit": "hourly"},
+            request=request,
+        )
         raise RateLimitExceededError(retry_after_seconds=3600)
     if day_count >= OTP_SEND_MAX_PER_DAY:
+        await audit_log(
+            db,
+            action=AuditAction.SECURITY_RATE_LIMIT_EXCEEDED,
+            actor_id=None,
+            actor_role=None,
+            resource_type="otp",
+            resource_id=None,
+            outcome=AuditOutcome.DENIED,
+            details={"phone": phone, "purpose": purpose, "limit": "daily"},
+            request=request,
+        )
         raise RateLimitExceededError(retry_after_seconds=86400)
 
     if await redis.exists(cooldown_key):
@@ -117,6 +167,19 @@ async def send_otp(
 
     logger.info("otp.sent", phone=phone, purpose=purpose, ttl=OTP_TTL_SECONDS)
 
+    # Audit the OTP send (actor unknown at this point — phone isn't a user ID)
+    await audit_log(
+        db,
+        action=AuditAction.OTP_SENT,
+        actor_id=None,
+        actor_role=None,
+        resource_type="phone",
+        resource_id=phone,
+        outcome=AuditOutcome.SUCCESS if sent else AuditOutcome.FAILURE,
+        details={"purpose": purpose, "ttl_seconds": OTP_TTL_SECONDS},
+        request=request,
+    )
+
     return {
         "phone": phone,
         "purpose": purpose,
@@ -126,24 +189,23 @@ async def send_otp(
         "debug_otp": otp if settings().is_development else None,
     }
 
-
-# ---------------------------------------------------------------------------
 # OTP verify flow
-# ---------------------------------------------------------------------------
-
-
 async def verify_otp(
     db: AsyncSession,
     phone: str,
     otp: str,
     full_name: str | None = None,
     preferred_language: str = "en",
-    # FIX: added device_info + ip_address so routes.py can pass them through
-    # to _issue_tokens for refresh token device tracking.
     device_info: str | None = None,
     ip_address: str | None = None,
+    *,
+    request: Request | None = None,
 ) -> TokenResponse:
-    """Verify an OTP and return tokens (login existing user or signup new user)."""
+    """Verify an OTP and return tokens (login existing user or signup new user).
+
+    FIX (T4): now writes audit_log entries for both OTP_VERIFIED (success)
+    and LOGIN_FAILED (wrong OTP). Previously neither was audited.
+    """
     redis = await get_redis()
     attempts_key_prefix = f"otp:attempts:{phone}"
 
@@ -181,6 +243,25 @@ async def verify_otp(
     if provided_hash != stored_hash_str:
         await redis.incr(attempts_key)
         remaining = OTP_VERIFY_MAX_ATTEMPTS - (attempts + 1)
+
+        # Audit the failed OTP verification
+        await audit_log(
+            db,
+            action=AuditAction.LOGIN_FAILED,
+            actor_id=None,
+            actor_role=None,
+            resource_type="phone",
+            resource_id=phone,
+            outcome=AuditOutcome.FAILURE,
+            details={
+                "reason": "invalid_otp",
+                "remaining_attempts": max(remaining, 0),
+            },
+            ip_address=ip_address,
+            user_agent=device_info,
+            request=request,
+        )
+
         raise ValidationError(
             f"Invalid OTP. {remaining} attempt(s) remaining."
             if remaining > 0
@@ -221,15 +302,38 @@ async def verify_otp(
     await repo.reset_failed_login(db, user.id)
     await repo.update_last_login(db, user.id)
 
-    # FIX: device_info + ip_address now forwarded to _issue_tokens
+    # Audit the successful OTP verification (login)
+    await audit_log(
+        db,
+        action=AuditAction.OTP_VERIFIED,
+        actor_id=user.id,
+        actor_role=user.role.value,
+        resource_type="phone",
+        resource_id=phone,
+        outcome=AuditOutcome.SUCCESS,
+        details={"method": "otp", "purpose": active_purpose},
+        ip_address=ip_address,
+        user_agent=device_info,
+        request=request,
+    )
+
+    await audit_log(
+        db,
+        action=AuditAction.LOGIN_SUCCESS,
+        actor_id=user.id,
+        actor_role=user.role.value,
+        resource_type="user",
+        resource_id=user.id,
+        outcome=AuditOutcome.SUCCESS,
+        details={"method": "otp"},
+        ip_address=ip_address,
+        user_agent=device_info,
+        request=request,
+    )
+
     return await _issue_tokens(db, user, device_info=device_info, ip_address=ip_address)
 
-
-# ---------------------------------------------------------------------------
 # Token issuance
-# ---------------------------------------------------------------------------
-
-
 async def _issue_tokens(
     db: AsyncSession,
     user: User,
@@ -277,19 +381,20 @@ async def _issue_tokens(
         user=UserPublic.model_validate(user),
     )
 
-
-# ---------------------------------------------------------------------------
 # Refresh token flow
-# ---------------------------------------------------------------------------
-
-
 async def refresh_access_token(
     db: AsyncSession,
     refresh_token: str,
     device_info: str | None = None,
     ip_address: str | None = None,
+    *,
+    request: Request | None = None,
 ) -> TokenResponse:
-    """Exchange a refresh token for a new access + refresh token pair."""
+    """Exchange a refresh token for a new access + refresh token pair.
+
+    FIX (T4): now writes audit_log entries for TOKEN_REFRESHED (success)
+    and for the suspected-token-theft case (revoked token reuse).
+    """
     payload = decode_token(refresh_token, expected_type="refresh")
     jti = payload.get("jti")
     user_id_str = payload.get("sub")
@@ -302,6 +407,20 @@ async def refresh_access_token(
 
     stored_token = await repo.get_refresh_token_by_jti(db, jti)
     if not stored_token:
+        # Audit: unknown JTI presented — could be a forged token or a very old one
+        await audit_log(
+            db,
+            action=AuditAction.TOKEN_REFRESHED,
+            actor_id=user_id,
+            actor_role=None,
+            resource_type="refresh_token",
+            resource_id=jti,
+            outcome=AuditOutcome.FAILURE,
+            details={"reason": "jti_not_found"},
+            ip_address=ip_address,
+            user_agent=device_info,
+            request=request,
+        )
         raise AuthenticationError("Refresh token not recognized")
 
     if stored_token.is_revoked:
@@ -311,6 +430,24 @@ async def refresh_access_token(
             jti=jti,
             revoked_reason=stored_token.revoked_reason,
         )
+        # Audit: suspected token theft — entire session family revoked
+        await audit_log(
+            db,
+            action=AuditAction.SECURITY_SUSPICIOUS_INPUT,
+            actor_id=user_id,
+            actor_role=None,
+            resource_type="refresh_token",
+            resource_id=jti,
+            outcome=AuditOutcome.DENIED,
+            details={
+                "reason": "revoked_token_reuse",
+                "revoked_reason": stored_token.revoked_reason,
+                "action_taken": "session_family_revoked",
+            },
+            ip_address=ip_address,
+            user_agent=device_info,
+            request=request,
+        )
         await repo.revoke_all_user_tokens(db, user_id, reason="suspected_theft")
         raise AuthenticationError(
             "Refresh token has been revoked. Please log in again."
@@ -319,6 +456,19 @@ async def refresh_access_token(
     provided_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
     if provided_hash != stored_token.token_hash:
         logger.warning("refresh_token.hash_mismatch", user_id=user_id_str, jti=jti)
+        await audit_log(
+            db,
+            action=AuditAction.TOKEN_REFRESHED,
+            actor_id=user_id,
+            actor_role=None,
+            resource_type="refresh_token",
+            resource_id=jti,
+            outcome=AuditOutcome.FAILURE,
+            details={"reason": "hash_mismatch"},
+            ip_address=ip_address,
+            user_agent=device_info,
+            request=request,
+        )
         raise AuthenticationError("Refresh token validation failed")
 
     user = await repo.get_user_by_id(db, user_id)
@@ -330,16 +480,38 @@ async def refresh_access_token(
 
     await repo.revoke_refresh_token(db, jti, reason="rotation")
 
+    # Audit the successful refresh
+    await audit_log(
+        db,
+        action=AuditAction.TOKEN_REFRESHED,
+        actor_id=user.id,
+        actor_role=user.role.value,
+        resource_type="refresh_token",
+        resource_id=jti,
+        outcome=AuditOutcome.SUCCESS,
+        details={"method": "rotation"},
+        ip_address=ip_address,
+        user_agent=device_info,
+        request=request,
+    )
+
     return await _issue_tokens(db, user, device_info=device_info, ip_address=ip_address)
 
 
-# ---------------------------------------------------------------------------
 # Logout
-# ---------------------------------------------------------------------------
+async def logout(
+    db: AsyncSession,
+    refresh_token: str,
+    *,
+    request: Request | None = None,
+    actor_id: UUID | None = None,
+) -> None:
+    """Revoke a refresh token. Idempotent.
 
-
-async def logout(db: AsyncSession, refresh_token: str) -> None:
-    """Revoke a refresh token. Idempotent."""
+    FIX (T4): now writes an audit_log entry (AuditAction.LOGOUT). The
+    actor_id is best-effort — if the token is malformed we can't know who
+    logged out, but we still audit the event with actor_id=None.
+    """
     try:
         payload = decode_token(refresh_token, expected_type="refresh")
     except AuthenticationError:
@@ -347,34 +519,70 @@ async def logout(db: AsyncSession, refresh_token: str) -> None:
         return
 
     jti = payload.get("jti")
+    user_id_str = payload.get("sub")
     if jti:
         await repo.revoke_refresh_token(db, jti, reason="logout")
         logger.info("logout.success", jti=jti)
 
+        # Audit the logout
+        await audit_log(
+            db,
+            action=AuditAction.LOGOUT,
+            actor_id=actor_id or (UUID(user_id_str) if user_id_str else None),
+            actor_role=None,
+            resource_type="refresh_token",
+            resource_id=jti,
+            outcome=AuditOutcome.SUCCESS,
+            details={"reason": "logout"},
+            request=request,
+        )
 
-async def logout_all_sessions(db: AsyncSession, user_id: object) -> None:
-    """Revoke all active refresh tokens for a user."""
+
+async def logout_all_sessions(
+    db: AsyncSession,
+    user_id: object,
+    *,
+    request: Request | None = None,
+) -> None:
+    """Revoke all active refresh tokens for a user.
+
+    FIX (T4): now writes an audit_log entry (AuditAction.LOGOUT).
+    """
     from uuid import UUID
 
-    count = await repo.revoke_all_user_tokens(
-        db, UUID(str(user_id)), reason="logout_all"
+    uid = UUID(str(user_id))
+    count = await repo.revoke_all_user_tokens(db, uid, reason="logout_all")
+    logger.info("logout_all.success", user_id=str(uid), revoked_count=count)
+
+    await audit_log(
+        db,
+        action=AuditAction.LOGOUT,
+        actor_id=uid,
+        actor_role=None,
+        resource_type="user",
+        resource_id=uid,
+        outcome=AuditOutcome.SUCCESS,
+        details={"reason": "logout_all", "revoked_count": count},
+        request=request,
     )
-    logger.info("logout_all.success", user_id=str(user_id), revoked_count=count)
 
 
-# ---------------------------------------------------------------------------
 # Password-based login
-# ---------------------------------------------------------------------------
-
-
 async def login_with_password(
     db: AsyncSession,
     phone_or_email: str,
     password: str,
     device_info: str | None = None,
     ip_address: str | None = None,
+    *,
+    request: Request | None = None,
 ) -> TokenResponse:
-    """Login with phone/email + password (admin/officer accounts only)."""
+    """Login with phone/email + password (admin/officer accounts only).
+
+    FIX (T4): now writes audit_log entries for LOGIN_SUCCESS,
+    LOGIN_FAILED, and ACCOUNT_LOCKED. Previously none of these events
+    were audited.
+    """
     from krishisetu.core.security import normalize_indian_phone, verify_password
 
     user = None
@@ -388,17 +596,70 @@ async def login_with_password(
         user = await repo.get_user_by_email(db, phone_or_email)
 
     if not user:
+        # Audit: user not found. Don't leak which (phone vs email) was tried.
+        await audit_log(
+            db,
+            action=AuditAction.LOGIN_FAILED,
+            actor_id=None,
+            actor_role=None,
+            resource_type="credentials",
+            resource_id=phone_or_email,
+            outcome=AuditOutcome.FAILURE,
+            details={"reason": "user_not_found"},
+            ip_address=ip_address,
+            user_agent=device_info,
+            request=request,
+        )
         raise AuthenticationError("Invalid credentials")
 
     if not user.is_active:
+        await audit_log(
+            db,
+            action=AuditAction.LOGIN_FAILED,
+            actor_id=user.id,
+            actor_role=user.role.value,
+            resource_type="user",
+            resource_id=user.id,
+            outcome=AuditOutcome.FAILURE,
+            details={"reason": "account_deactivated"},
+            ip_address=ip_address,
+            user_agent=device_info,
+            request=request,
+        )
         raise AuthenticationError("Account is deactivated")
 
     if user.is_locked:
+        await audit_log(
+            db,
+            action=AuditAction.LOGIN_FAILED,
+            actor_id=user.id,
+            actor_role=user.role.value,
+            resource_type="user",
+            resource_id=user.id,
+            outcome=AuditOutcome.DENIED,
+            details={"reason": "account_locked"},
+            ip_address=ip_address,
+            user_agent=device_info,
+            request=request,
+        )
         raise AuthenticationError(
             "Account is temporarily locked. Try again later or contact support."
         )
 
     if not user.password_hash:
+        await audit_log(
+            db,
+            action=AuditAction.LOGIN_FAILED,
+            actor_id=user.id,
+            actor_role=user.role.value,
+            resource_type="user",
+            resource_id=user.id,
+            outcome=AuditOutcome.FAILURE,
+            details={"reason": "password_not_set"},
+            ip_address=ip_address,
+            user_agent=device_info,
+            request=request,
+        )
         raise AuthenticationError(
             "Password login is not enabled for this account. Use OTP login."
         )
@@ -413,12 +674,48 @@ async def login_with_password(
                 user_id=str(user.id),
                 failed_count=failed_count,
             )
+            # Audit: account locked due to brute-force
+            await audit_log(
+                db,
+                action=AuditAction.ACCOUNT_LOCKED,
+                actor_id=user.id,
+                actor_role=user.role.value,
+                resource_type="user",
+                resource_id=user.id,
+                outcome=AuditOutcome.FAILURE,
+                details={
+                    "reason": "max_failed_attempts",
+                    "failed_count": failed_count,
+                    "locked_for_minutes": ACCOUNT_LOCKOUT_DURATION_MINUTES,
+                },
+                ip_address=ip_address,
+                user_agent=device_info,
+                request=request,
+            )
             raise AuthenticationError(
                 "Account locked due to too many failed attempts. "
                 f"Try again in {ACCOUNT_LOCKOUT_DURATION_MINUTES} minutes."
             )
 
         remaining = ACCOUNT_LOCKOUT_THRESHOLD - failed_count
+        # Audit: wrong password
+        await audit_log(
+            db,
+            action=AuditAction.LOGIN_FAILED,
+            actor_id=user.id,
+            actor_role=user.role.value,
+            resource_type="user",
+            resource_id=user.id,
+            outcome=AuditOutcome.FAILURE,
+            details={
+                "reason": "wrong_password",
+                "failed_count": failed_count,
+                "remaining_attempts": remaining,
+            },
+            ip_address=ip_address,
+            user_agent=device_info,
+            request=request,
+        )
         raise AuthenticationError(
             f"Invalid credentials. {remaining} attempt(s) remaining before account lock."
         )
@@ -426,16 +723,27 @@ async def login_with_password(
     await repo.reset_failed_login(db, user.id)
     await repo.update_last_login(db, user.id)
 
+    # Audit: successful password login
+    await audit_log(
+        db,
+        action=AuditAction.LOGIN_SUCCESS,
+        actor_id=user.id,
+        actor_role=user.role.value,
+        resource_type="user",
+        resource_id=user.id,
+        outcome=AuditOutcome.SUCCESS,
+        details={"method": "password"},
+        ip_address=ip_address,
+        user_agent=device_info,
+        request=request,
+    )
+
     return await _issue_tokens(db, user, device_info=device_info, ip_address=ip_address)
 
 
-# ---------------------------------------------------------------------------
 # Google OAuth
-# ---------------------------------------------------------------------------
-
-
 async def generate_google_oauth_state() -> str:
-    """Generate and store a one-time CSRF state token for Google OAuth (10-min TTL)."""
+    """Generate and store a one-time csrf state token for Google OAuth (10-min TTL)."""
     redis = await get_redis()
     state = secrets.token_urlsafe(32)
     await redis.set(
@@ -450,15 +758,12 @@ async def google_oauth_login(
     state: str,
     device_info: str | None = None,
     ip_address: str | None = None,
+    *,
+    request: Request | None = None,
 ) -> TokenResponse:
     """Exchange a Google OAuth authorization code for KrishiSetu JWT tokens.
 
-    Flow:
-    1. Verify CSRF state (one-time use)
-    2. Exchange code → Google access token
-    3. Fetch Google user profile
-    4. Find or create KrishiSetu user
-    5. Issue JWT tokens
+    FIX (T4): now writes audit_log entries for LOGIN_SUCCESS (Google OAuth).
     """
     import httpx
 
@@ -476,8 +781,6 @@ async def google_oauth_login(
     cfg = settings()
     if not cfg.google_oauth_enabled:
         raise AuthenticationError("Google OAuth is not configured on this server.")
-
-    # 2. Exchange code for Google tokens
     token_payload = {
         "code": code,
         "client_id": cfg.GOOGLE_OAUTH_CLIENT_ID,
@@ -506,8 +809,6 @@ async def google_oauth_login(
         google_access_token = token_resp.json().get("access_token")
         if not google_access_token:
             raise AuthenticationError("Google did not return an access token.")
-
-        # 3. Fetch user profile
         async with httpx.AsyncClient(timeout=10.0) as client:
             userinfo_resp = await client.get(
                 "https://www.googleapis.com/oauth2/v3/userinfo",
@@ -538,13 +839,8 @@ async def google_oauth_login(
 
     google_sub: str = userinfo.get("sub", "")
     full_name: str = userinfo.get("name") or email.split("@")[0]
-
-    # 4. Find or create user
     user = await repo.get_user_by_email(db, email)
-
     if user is None:
-        # Google users don't have a phone — derive a synthetic placeholder.
-        # phone_verified=False means it can't be used for OTP.
         # TODO: add a migration to make phone nullable for OAuth-only accounts.
         synthetic_phone = _derive_synthetic_phone(google_sub or email)
         if await repo.get_user_by_phone(db, synthetic_phone):
@@ -574,6 +870,21 @@ async def google_oauth_login(
 
     logger.info("google_oauth.login_success", user_id=str(user.id), email=email)
 
+    # Audit: successful Google OAuth login
+    await audit_log(
+        db,
+        action=AuditAction.LOGIN_SUCCESS,
+        actor_id=user.id,
+        actor_role=user.role.value,
+        resource_type="user",
+        resource_id=user.id,
+        outcome=AuditOutcome.SUCCESS,
+        details={"method": "google_oauth", "email": email},
+        ip_address=ip_address,
+        user_agent=device_info,
+        request=request,
+    )
+
     return await _issue_tokens(db, user, device_info=device_info, ip_address=ip_address)
 
 
@@ -588,3 +899,205 @@ def _derive_synthetic_phone(seed: str) -> str:
     digest = hashlib.sha256(seed.encode()).hexdigest()
     numeric = int(digest[:16], 16) % (10 ** 9)
     return f"9{numeric:09d}"
+
+
+# Aadhaar e-KYC (moved from routes.py — T4 fix #2)
+async def send_aadhaar_otp(
+    db: AsyncSession,
+    user: User,
+    aadhaar: str,
+    *,
+    request: Request | None = None,
+) -> dict[str, Any]:
+    """Send an Aadhaar OTP for e-KYC verification.
+
+    FIX (T4): moved out of routes.py into the service layer so that:
+      1. The consent check (has_active_consent for IDENTITY_VERIFICATION)
+         can be enforced before sending PII to UIDAI — DPDP Act 2023,
+         Section 11 requires explicit consent before processing.
+      2. The audit_log entry (AADHAAR_EKYC_INITIATED) is written with the
+         full request context (IP, UA, request_id).
+      3. The route handler stays thin — just request/response marshalling.
+
+    Args:
+        db: async DB session
+        user: the authenticated user requesting e-KYC
+        aadhaar: 12-digit Aadhaar number (validated by UIDAI client)
+        request: FastAPI Request (for IP/UA extraction in audit log)
+
+    Returns:
+        Dict with transaction_id, message, masked_aadhaar, sent_at —
+        shaped to match the AadhaarOTPResponse schema in routes.py.
+
+    Raises:
+        AuthorizationError: if the user has not granted consent for
+            identity_verification
+        ValidationError: if the Aadhaar number fails Verhoeff checksum
+        RateLimitExceededError: if UIDAI rate limits are exceeded
+    """
+    has_consent = await has_active_consent(
+        db, user.id, ConsentPurpose.IDENTITY_VERIFICATION
+    )
+    if not has_consent:
+        # Audit the denied attempt
+        await audit_log(
+            db,
+            action=AuditAction.AADHAAR_EKYC_INITIATED,
+            actor_id=user.id,
+            actor_role=user.role.value,
+            resource_type="user",
+            resource_id=user.id,
+            outcome=AuditOutcome.DENIED,
+            details={"reason": "consent_not_granted"},
+            request=request,
+        )
+        raise AuthorizationError(
+            "Consent for identity verification (Aadhaar e-KYC) is required. "
+            "Please grant consent on the Privacy & Consent page first."
+        )
+
+    from krishisetu.integrations.uidai import get_uidai_client
+
+    client = get_uidai_client()
+    result = await client.send_otp(aadhaar)
+
+    # Audit the initiation (success)
+    await audit_log(
+        db,
+        action=AuditAction.AADHAAR_EKYC_INITIATED,
+        actor_id=user.id,
+        actor_role=user.role.value,
+        resource_type="user",
+        resource_id=user.id,
+        outcome=AuditOutcome.SUCCESS,
+        details={
+            "transaction_id": result.transaction_id,
+            "masked_aadhaar": f"XXXX-XXXX-{aadhaar[-4:]}",
+        },
+        request=request,
+    )
+
+    return {
+        "transaction_id": result.transaction_id,
+        "message": result.message,
+        "masked_aadhaar": f"XXXX-XXXX-{aadhaar[-4:]}",
+        "sent_at": result.sent_at.isoformat(),
+    }
+
+
+async def verify_aadhaar_otp(
+    db: AsyncSession,
+    user: User,
+    aadhaar: str,
+    otp: str,
+    transaction_id: str,
+    *,
+    request: Request | None = None,
+) -> dict[str, Any]:
+    """Verify an Aadhaar OTP and mark the user's Aadhaar as verified.
+
+    FIX (T4): moved out of routes.py into the service layer. The consent
+    check is re-verified here (defense in depth — the user may have
+    withdrawn consent between send_otp and verify_otp).
+
+    Args:
+        db: async DB session
+        user: the authenticated user
+        aadhaar: 12-digit Aadhaar number
+        otp: 6-digit OTP entered by the user
+        transaction_id: transaction ID from send_aadhaar_otp() response
+
+    Returns:
+        Dict with verified, masked_aadhaar, name, gender, year_of_birth,
+        state, district — shaped to match AadhaarVerificationResponse.
+
+    Raises:
+        AuthorizationError: if consent was withdrawn between send and verify
+        ValidationError: if the OTP is wrong / transaction expired
+    """
+    # --- Re-verify consent (defense in depth) ---
+    has_consent = await has_active_consent(
+        db, user.id, ConsentPurpose.IDENTITY_VERIFICATION
+    )
+    if not has_consent:
+        await audit_log(
+            db,
+            action=AuditAction.AADHAAR_EKYC_COMPLETED,
+            actor_id=user.id,
+            actor_role=user.role.value,
+            resource_type="user",
+            resource_id=user.id,
+            outcome=AuditOutcome.DENIED,
+            details={"reason": "consent_withdrawn_before_verify"},
+            request=request,
+        )
+        raise AuthorizationError(
+            "Consent for identity verification was withdrawn. "
+            "Please re-grant consent before completing Aadhaar e-KYC."
+        )
+
+    # --- Call UIDAI ---
+    from krishisetu.integrations.uidai import get_uidai_client
+
+    client = get_uidai_client()
+    result = await client.verify_otp(aadhaar, otp, transaction_id)
+
+    if result.verified:
+        # Persist the Aadhaar hash + verified flag on the user
+        aadhaar_hash = hash_aadhaar(aadhaar)
+        updates: dict[str, object] = {
+            "aadhaar_verified": True,
+            "aadhaar_hash": aadhaar_hash,
+        }
+        if result.name:
+            updates["full_name"] = result.name
+
+        await repo.update_user(db, user.id, **updates)
+
+        logger.info(
+            "aadhaar.verified",
+            user_id=str(user.id),
+            masked_aadhaar=result.masked_aadhaar,
+        )
+
+        # Audit the successful e-KYC completion
+        await audit_log(
+            db,
+            action=AuditAction.AADHAAR_EKYC_COMPLETED,
+            actor_id=user.id,
+            actor_role=user.role.value,
+            resource_type="user",
+            resource_id=user.id,
+            outcome=AuditOutcome.SUCCESS,
+            details={
+                "masked_aadhaar": result.masked_aadhaar,
+                "name_updated": bool(result.name),
+            },
+            request=request,
+        )
+    else:
+        # Audit the failed verification attempt
+        await audit_log(
+            db,
+            action=AuditAction.AADHAAR_EKYC_COMPLETED,
+            actor_id=user.id,
+            actor_role=user.role.value,
+            resource_type="user",
+            resource_id=user.id,
+            outcome=AuditOutcome.FAILURE,
+            details={
+                "reason": "otp_invalid_or_expired",
+                "masked_aadhaar": result.masked_aadhaar,
+            },
+            request=request,
+        )
+
+    return {
+        "verified": result.verified,
+        "masked_aadhaar": result.masked_aadhaar,
+        "name": result.name,
+        "gender": result.gender,
+        "year_of_birth": result.year_of_birth,
+        "state": result.state,
+        "district": result.district,
+    }

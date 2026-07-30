@@ -1,18 +1,4 @@
-"""Create disease schema: diseases, treatments, reports, predictions, feedback
-
-Creates the `intelligence` schema tables (already exists from migration 0001)
-and:
-- intelligence.diseases             (master data — disease catalog)
-- intelligence.disease_treatments   (treatment recommendations)
-- intelligence.disease_reports      (farmer-submitted photos)
-- intelligence.disease_predictions  (ML model predictions with provenance)
-- intelligence.disease_feedback     (farmer feedback for model improvement)
-
-Key design:
-- disease_predictions.all_predictions is JSONB (full distribution, not just top-1)
-- disease_reports.image_url stores S3 object key (pre-signed URL generated on demand)
-- Unique constraint on disease_predictions.report_id (one prediction per report)
-- Indexes on disease_slug, model_version, status for common query patterns
+"""
 
 Revision ID: 0005
 Revises: 0004

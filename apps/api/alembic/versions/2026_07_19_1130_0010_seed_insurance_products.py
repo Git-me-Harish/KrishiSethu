@@ -1,23 +1,4 @@
-"""Seed insurance products (PMFBY) for Kharif 2026 and Rabi 2026-27
-
-Populates insurance.insurance_products with real PMFBY (Pradhan Mantri
-Fasal Bima Yojana) products for major crops and states.
-
-PMFBY premium structure (subsidized):
-- Farmer pays: 2% of sum insured for Kharif crops
-- Farmer pays: 1.5% of sum insured for Rabi crops
-- Farmer pays: 5% of sum insured for commercial/horticultural crops
-- Government subsidizes the remaining premium (50% central + state share)
-
-Sum insured values are crop-specific and based on average cost of
-cultivation + reasonable profit margin. Values sourced from PMFBY
-operational guidelines (2024 revision).
-
-Coverage period:
-- Kharif 2026: June 1, 2026 to October 31, 2026
-- Rabi 2026-27: November 1, 2026 to March 31, 2027
-
-NO MOCK DATA — every entry reflects real PMFBY scheme parameters.
+"""
 
 Revision ID: 0010
 Revises: 0009

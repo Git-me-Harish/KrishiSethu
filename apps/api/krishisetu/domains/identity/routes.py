@@ -11,18 +11,21 @@ Endpoints:
 - POST /auth/logout-all        — revoke all sessions for current user
 - GET  /me                     — get current user profile
 - PATCH /me                    — update current user profile
+- POST /auth/aadhaar/send-otp  — send Aadhaar OTP for e-KYC
+- POST /auth/aadhaar/verify-otp — verify Aadhaar OTP, complete e-KYC
 
-FIX (T3): the three auth endpoints that accept credentials
-(/auth/send-otp, /auth/verify-otp, /auth/login-password) are now
+FIX (T4): the Aadhaar e-KYC endpoints (/auth/aadhaar/send-otp and
+/auth/aadhaar/verify-otp) now delegate to the service layer
+(services.send_aadhaar_otp / services.verify_aadhaar_otp) instead of
+calling the UIDAI client and repo directly from the route handler. The
+service layer enforces the consent check (DPDP Section 11) and writes
+audit_log entries with full request context. The route handlers are now
+thin — just request/response marshalling.
+
+All auth endpoints that accept credentials (/auth/send-otp, /auth/verify-otp,
+/auth/login-password, /auth/aadhaar/send-otp, /auth/aadhaar/verify-otp) are
 rate-limited via slowapi using the RATE_LIMIT_AUTH setting (default
-5/minute per IP). This closes a brute-force hole — previously an attacker
-could send unlimited OTP requests (driving up MSG91 costs) or brute-force
-passwords / OTPs with no throttling.
-
-Note: the OTP-send service layer has its own per-phone rate limit (60s
-cooldown + hourly/daily caps) via Redis, but the HTTP layer had no
-per-IP limit — meaning an attacker could rotate phone numbers and send
-millions of OTPs. The HTTP rate limit closes that hole.
+5/minute per IP) — wired in T3.
 """
 
 from __future__ import annotations
@@ -54,6 +57,7 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
+
 # Helper: extract device info from request
 def _get_device_info(request: Request) -> tuple[str | None, str | None]:
     """Extract User-Agent and client IP from the request."""
@@ -68,7 +72,6 @@ def _get_device_info(request: Request) -> tuple[str | None, str | None]:
         client_ip = request.client.host if request.client else None
 
     return user_agent, client_ip
-
 
 # OTP-based authentication
 class SendOTPResponse(BaseModel):
@@ -88,7 +91,7 @@ class SendOTPResponse(BaseModel):
 @router.post("/send-otp", response_model=SendOTPResponse, status_code=202)
 @limiter.limit(rate_limit_auth)
 async def send_otp(
-    request: Request,
+    request: Request,  # REQUIRED by slowapi — must be the first param
     payload: SendOTPRequest,
     db: DBSession,
 ) -> SendOTPResponse:
@@ -97,7 +100,9 @@ async def send_otp(
     Rate-limited to RATE_LIMIT_AUTH (default 5/minute per IP) to prevent
     OTP-sms cost attacks and phone-number enumeration.
     """
-    result = await services.send_otp(db, payload.phone, payload.purpose)
+    result = await services.send_otp(
+        db, payload.phone, payload.purpose, request=request
+    )
     return SendOTPResponse(**result)
 
 
@@ -127,8 +132,8 @@ async def verify_otp(
         preferred_language=payload.preferred_language,
         device_info=device_info,
         ip_address=ip_address,
+        request=request,
     )
-
 
 # Password-based authentication (alternative)
 class PasswordLoginRequest(BaseModel):
@@ -165,7 +170,9 @@ async def login_with_password(
         payload.password,
         device_info=device_info,
         ip_address=ip_address,
+        request=request,
     )
+
 
 # Google OAuth
 @router.get("/google", status_code=302)
@@ -248,6 +255,7 @@ async def google_oauth_callback(
             state=state,
             device_info=device_info,
             ip_address=ip_address,
+            request=request,
         )
     except AuthenticationError as exc:
         logger.warning("google_oauth.callback_failed", reason=str(exc))
@@ -295,7 +303,9 @@ async def refresh_token(
         payload.refresh_token,
         device_info=device_info,
         ip_address=ip_address,
+        request=request,
     )
+
 
 # Aadhaar e-KYC (Phase D)
 class AadhaarSendOTPRequest(BaseModel):
@@ -307,12 +317,15 @@ class AadhaarSendOTPRequest(BaseModel):
         max_length=12,
         description="12-digit Aadhaar number",
     )
+
+
 class AadhaarVerifyOTPRequest(BaseModel):
     """Request body for POST /auth/aadhaar/verify-otp."""
 
     aadhaar: str = Field(..., min_length=12, max_length=12)
     otp: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
     transaction_id: str = Field(..., min_length=10, max_length=64)
+
 
 class AadhaarOTPResponse(BaseModel):
     """Response for Aadhaar OTP send."""
@@ -321,6 +334,7 @@ class AadhaarOTPResponse(BaseModel):
     message: str
     masked_aadhaar: str
     sent_at: str
+
 
 class AadhaarVerificationResponse(BaseModel):
     """Response for Aadhaar OTP verification."""
@@ -340,23 +354,25 @@ async def send_aadhaar_otp(
     request: Request,  # REQUIRED by slowapi
     payload: AadhaarSendOTPRequest,
     current_user: CurrentUser,
+    db: DBSession,
 ) -> AadhaarOTPResponse:
     """Send Aadhaar OTP for e-KYC verification.
+
+    FIX (T4): now delegates to services.send_aadhaar_otp() which:
+      1. Checks has_active_consent(IDENTITY_VERIFICATION) — DPDP Section 11
+      2. Calls the UIDAI client
+      3. Writes an audit_log entry (AADHAAR_EKYC_INITIATED)
 
     Rate-limited to RATE_LIMIT_AUTH (default 5/minute per IP) to prevent
     UIDAI API cost attacks and Aadhaar-number enumeration.
     """
-    from krishisetu.integrations.uidai import get_uidai_client
-
-    client = get_uidai_client()
-    result = await client.send_otp(payload.aadhaar)
-
-    return AadhaarOTPResponse(
-        transaction_id=result.transaction_id,
-        message=result.message,
-        masked_aadhaar=f"XXXX-XXXX-{payload.aadhaar[-4:]}",
-        sent_at=result.sent_at.isoformat(),
+    result = await services.send_aadhaar_otp(
+        db,
+        current_user,
+        payload.aadhaar,
+        request=request,
     )
+    return AadhaarOTPResponse(**result)
 
 
 @router.post("/aadhaar/verify-otp", response_model=AadhaarVerificationResponse)
@@ -369,53 +385,36 @@ async def verify_aadhaar_otp(
 ) -> AadhaarVerificationResponse:
     """Verify Aadhaar OTP and mark the user's Aadhaar as verified.
 
+    FIX (T4): now delegates to services.verify_aadhaar_otp() which:
+      1. Re-checks consent (defense in depth — may have been withdrawn)
+      2. Calls the UIDAI client
+      3. Persists aadhaar_hash + aadhaar_verified on the user
+      4. Writes an audit_log entry (AADHAAR_EKYC_COMPLETED)
+
     Rate-limited to RATE_LIMIT_AUTH (default 5/minute per IP) to prevent
     Aadhaar OTP brute-force.
     """
-    from krishisetu.integrations.uidai import get_uidai_client
-    from krishisetu.core.security import hash_aadhaar
-    from krishisetu.domains.identity import repository as repo
-
-    client = get_uidai_client()
-    result = await client.verify_otp(
-        payload.aadhaar, payload.otp, payload.transaction_id
+    result = await services.verify_aadhaar_otp(
+        db,
+        current_user,
+        payload.aadhaar,
+        payload.otp,
+        payload.transaction_id,
+        request=request,
     )
+    return AadhaarVerificationResponse(**result)
 
-    if result.verified:
-        aadhaar_hash = hash_aadhaar(payload.aadhaar)
-        updates: dict[str, object] = {
-            "aadhaar_verified": True,
-            "aadhaar_hash": aadhaar_hash,
-        }
-        if result.name:
-            updates["full_name"] = result.name
 
-        await repo.update_user(db, current_user.id, **updates)
-
-        logger.info(
-            "aadhaar.verified",
-            user_id=str(current_user.id),
-            masked_aadhaar=result.masked_aadhaar,
-        )
-
-    return AadhaarVerificationResponse(
-        verified=result.verified,
-        masked_aadhaar=result.masked_aadhaar,
-        name=result.name,
-        gender=result.gender,
-        year_of_birth=result.year_of_birth,
-        state=result.state,
-        district=result.district,
-    )
 
 # Logout
 @router.post("/logout", status_code=200)
 async def logout(
     payload: LogoutRequest,
     db: DBSession,
+    request: Request,
 ) -> dict:
     """Revoke the given refresh token (logout from current device). Idempotent."""
-    await services.logout(db, payload.refresh_token)
+    await services.logout(db, payload.refresh_token, request=request)
     return {"message": "Logged out successfully"}
 
 
@@ -431,9 +430,10 @@ class LogoutAllRequest(BaseModel):
 async def logout_all(
     current_user: CurrentUser,
     db: DBSession,
+    request: Request,
 ) -> dict:
     """Revoke ALL active refresh tokens for the current user (logout all devices)."""
-    await services.logout_all_sessions(db, current_user.id)
+    await services.logout_all_sessions(db, current_user.id, request=request)
     return {"message": "All sessions logged out successfully"}
 
 
@@ -490,6 +490,7 @@ async def update_me(
             return UserPublic.model_validate(updated)
 
     return UserPublic.model_validate(current_user)
+
 
 
 # Admin user management (/admin/users)

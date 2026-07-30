@@ -1,21 +1,4 @@
-"""Seed government schemes catalog with real Indian agricultural schemes
-
-Populates schemes.scheme_catalog with major central and state government
-schemes for Indian farmers.
-
-Schemes included:
-- PM-Kisan Samman Nidhi (₹6,000/year income support)
-- Kisan Credit Card (KCC) (crop loans at subsidised interest)
-- PMFBY (crop insurance — linked to insurance module)
-- Soil Health Card Scheme
-- PM Krishi Sinchayee Yojana (micro irrigation subsidy)
-- PM Fasal Bima Yojana (already in insurance module, listed here for discovery)
-- Sub-Mission on Agricultural Mechanization (equipment subsidy)
-- National Food Security Mission
-- PM-AASHA (price support)
-
-NO MOCK DATA — every scheme is a real Government of India initiative with
-verifiable parameters (benefit amounts, eligibility, ministry).
+"""
 
 Revision ID: 0014
 Revises: 0013
