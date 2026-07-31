@@ -122,6 +122,9 @@ uploads/
 *.pt
 *.pth
 *.onnx
+*.onnx.data
+!apps/ml-inference/models/disease_classifier_v1.onnx
+!apps/ml-inference/models/disease_classifier_v1.onnx.data
 *.h5
 *.pkl
 mlruns/

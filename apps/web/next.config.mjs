@@ -11,6 +11,10 @@ const nextConfig = {
     remotePatterns: [
       { protocol: "https", hostname: "images.unsplash.com" },
       { protocol: "https", hostname: "sentinel-cdn.s3.amazonaws.com" },
+      { protocol: "http", hostname: "localhost", port: 9000 },
+      { protocol: "http", hostname: "minio", port: 9000 },
+      // In production, add your S3 / CDN hostname here, e.g.:
+      // { protocol: "https", hostname: "krishisetu.s3.ap-south-1.amazonaws.com" },
     ],
   },
   async headers() {

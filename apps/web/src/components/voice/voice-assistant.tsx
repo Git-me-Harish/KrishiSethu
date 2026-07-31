@@ -190,7 +190,7 @@ export function VoiceAssistant() {
             </div>
 
             {/* Response */}
-            <div className="rounded-md bg-primary-5 p-3">
+            <div className="rounded-md bg-primary/5 p-3">
               <div className="flex items-start gap-2">
                 <Volume2 className="h-4 w-4 text-primary mt-0.5" />
                 <div className="flex-1">

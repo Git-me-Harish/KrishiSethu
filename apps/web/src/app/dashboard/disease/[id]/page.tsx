@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
+import Image from "next/image";
 import {
   ArrowLeft,
   Loader2,
@@ -164,11 +165,13 @@ export default function DiseaseReportDetailPage() {
               <CardTitle className="text-base">Submitted Photo</CardTitle>
             </CardHeader>
             <CardContent>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
+              <Image
                 src={report.image_url}
                 alt="Disease report"
+                width={800}
+                height={600}
                 className="w-full rounded-md"
+                unoptimized
               />
               <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
                 <Clock className="h-3 w-3" />
@@ -375,7 +378,7 @@ export default function DiseaseReportDetailPage() {
                       key={treatment.id}
                       className={`rounded-md border p-4 ${
                         treatment.is_primary
-                          ? "border-primary/30 bg-primary-5"
+                          ? "border-primary/30 bg-primary/5"
                           : "border-slate-200"
                       }`}
                     >

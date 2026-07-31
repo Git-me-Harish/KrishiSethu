@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import Image from "next/image";
 import {
   ArrowLeft,
   Plus,
@@ -188,11 +189,12 @@ export default function DiseaseListPage() {
                 >
                   {/* Image preview */}
                   <div className="relative h-40 bg-slate-100">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
+                    <Image
                       src={report.image_url}
                       alt="Disease report"
-                      className="h-full w-full object-cover"
+                      fill
+                      className="object-cover"
+                      unoptimized
                     />
                     <div className={`absolute top-2 right-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${badge.color}`}>
                       <Icon className={`h-3 w-3 ${report.status === "processing" ? "animate-spin" : ""}`} />

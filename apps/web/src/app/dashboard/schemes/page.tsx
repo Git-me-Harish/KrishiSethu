@@ -287,7 +287,7 @@ function SchemeCard({ scheme, onApply }: { scheme: GovtScheme; onApply: () => vo
 
         {/* Benefit */}
         {scheme.benefit_description && (
-          <div className="rounded-md bg-primary-5 p-2">
+          <div className="rounded-md bg-primary/5 p-2">
             <p className="text-xs font-medium text-primary">Benefit</p>
             <p className="text-sm text-slate-700">{scheme.benefit_description}</p>
           </div>

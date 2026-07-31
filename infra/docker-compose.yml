@@ -233,10 +233,10 @@ services:
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env}
       S3_BUCKET_NAME: krishisetu-models
       S3_REGION: ap-south-1
-      DISEASE_CLASSIFIER_MODEL_PATH: /app/models/disease_classifier_dummy.onnx
-      DISEASE_CLASSIFIER_MODEL_VERSION: v0.1.0-dummy
+      DISEASE_CLASSIFIER_MODEL_PATH: /app/models/disease_classifier_v1.onnx
+      DISEASE_CLASSIFIER_MODEL_VERSION: v1.0.0-baseline
       DISEASE_CLASSIFIER_LABELS: healthy,tomato_early_blight,tomato_late_blight,rice_blast,rice_bacterial_blight,wheat_stripe_rust
-      MODEL_WARMUP_ON_START: "false"  # Disable warmup since dummy model may not exist
+      MODEL_WARMUP_ON_START: "true"  # T6: warmup the proper baseline model on startup
       MAX_IMAGE_SIZE_MB: 10
       INFERENCE_TIMEOUT_SECONDS: 30
       CORS_ORIGINS: '["http://localhost:3000"]'

@@ -224,7 +224,7 @@ export default function ClaimDetailPage() {
                         <div
                           key={ev.id}
                           className={`rounded-md border p-4 ${
-                            ev.is_auto_attached ? "border-primary/20 bg-primary-5" : "border-slate-200"
+                            ev.is_auto_attached ? "border-primary/20 bg-primary/5" : "border-slate-200"
                           }`}
                         >
                           <div className="flex items-start gap-3">

@@ -1,11 +1,11 @@
-"""NDVI domain — business logic services.
+"""NDVI domain business logic services.
 
 Orchestrates:
 - NDVI computation for a plot (fetch bands → compute NDVI → store observation)
 - Anomaly detection (compare to previous observation)
 - Plot NDVI summary (latest + trend + alerts)
 - District heatmap aggregation (for officers)
-- Manual refresh (user-triggered)
+- Manual refresh (user-triggered, async via Celery + outbox)
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from krishisetu.core.exceptions import NotFoundError, ValidationError
 from krishisetu.core.logging import get_logger
+from krishisetu.core.outbox import dispatch_via_outbox
 from krishisetu.core.storage import get_storage
 from krishisetu.domains.farmer import repository as farmer_repo
 from krishisetu.domains.farmer.models import Plot
@@ -49,32 +50,27 @@ from krishisetu.integrations.sentinel_hub import get_sentinel_client
 
 logger = get_logger(__name__)
 
-
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
-
-# Maximum plots to refresh per nightly batch
 MAX_PLOTS_PER_BATCH = 100
-
-# NDVI observation retention (days) — older observations are archived
 OBSERVATION_RETENTION_DAYS = 365
-
-# Raster dimensions for fetched imagery
 RASTER_WIDTH = 100
 RASTER_HEIGHT = 100
 
+# Rate limit for manual refresh: once per 12 hours per plot
+REFRESH_COOLDOWN_HOURS = 12
 
-# ---------------------------------------------------------------------------
-# NDVI computation
-# ---------------------------------------------------------------------------
-
-
+# NDVI computation (called by the Celery task, NOT by the HTTP route)
 async def compute_and_store_ndvi(
     db: AsyncSession,
     plot_id: UUID,
 ) -> dict[str, Any]:
     """Compute NDVI for a plot and store the observation.
+
+    This is the heavy-lifting function — it fetches satellite imagery,
+    computes NDVI, uploads the raster, stores the observation, and runs
+    anomaly detection. It's called by the Celery task
+    (refresh_plot_ndvi_task) in the background, NOT by the HTTP route
+    directly.
 
     Steps:
     1. Fetch plot (with boundary centroid)
@@ -87,17 +83,17 @@ async def compute_and_store_ndvi(
 
     Returns dict with observation details and any anomaly created.
     """
-    # --- 1. Fetch plot ---
+    # Fetch plot
     plot = await farmer_repo.get_plot_by_id(db, plot_id)
     if not plot:
         raise NotFoundError("Plot", str(plot_id))
 
-    # --- 2. Compute bounding box ---
+    # Compute bounding box
     bbox = _compute_bbox_from_plot(plot)
     if not bbox:
         raise ValidationError("Plot has no boundary — cannot compute NDVI")
 
-    # --- 3. Fetch band data ---
+    # Fetch band data
     sentinel = get_sentinel_client()
     band_data = await sentinel.fetch_band_data(
         bbox=bbox,
@@ -110,7 +106,7 @@ async def compute_and_store_ndvi(
     if not band_data:
         raise ValidationError("No suitable satellite imagery available (cloud cover too high)")
 
-    # --- 4. Compute NDVI statistics ---
+    # Compute NDVI statistics
     stats = compute_ndvi_stats(band_data)
 
     # Skip storage if too cloudy (>50%)
@@ -126,14 +122,12 @@ async def compute_and_store_ndvi(
             "cloud_cover_pct": float(stats.cloud_cover_pct),
         }
 
-    # --- 5. Upload raster to S3 (if raster available) ---
+    # Upload raster to S3 (if raster available)
     raster_url = None
     if stats.ndvi_raster:
         storage = get_storage()
         raster_key = storage.ndvi_raster_key(plot_id, band_data.observed_at.strftime("%Y-%m-%d"))
         try:
-            # In production, this would be a GeoTIFF. For now, store as JSON
-            # (the frontend can render it as a heatmap overlay).
             import json
 
             raster_json = json.dumps({
@@ -155,7 +149,7 @@ async def compute_and_store_ndvi(
                 error=str(e),
             )
 
-    # --- 6. Store observation ---
+    # Store observation
     source = NDVISource.SYNTHETIC if not sentinel.is_live else NDVISource.SENTINEL2
 
     observation = await repo.create_observation(
@@ -177,7 +171,7 @@ async def compute_and_store_ndvi(
     if not observation:
         return {"status": "failed", "reason": "storage_failed"}
 
-    # --- 7. Anomaly detection ---
+    # Anomaly detection
     anomaly = await _detect_and_create_anomaly(
         db,
         plot_id=plot_id,
@@ -217,7 +211,7 @@ async def _detect_and_create_anomaly(
         db, plot_id, current_observation.observed_at
     )
     if not previous:
-        return None  # First observation — no comparison
+        return None
 
     prev_ndvi = float(previous.ndvi_mean)
     curr_ndvi = float(current_observation.ndvi_mean)
@@ -229,12 +223,10 @@ async def _detect_and_create_anomaly(
 
     anomaly_type = NDVIAnomalyType(anomaly_type_str)
 
-    # Check for duplicate (don't spam alerts for the same issue)
     existing = await repo.find_duplicate_anomaly(db, plot_id, anomaly_type)
     if existing:
         return None
 
-    # Create the alert
     alert = await repo.create_anomaly_alert(
         db,
         plot_id=plot_id,
@@ -256,37 +248,23 @@ async def _detect_and_create_anomaly(
         drop=drop,
     )
 
-    # TODO: Dispatch push notification to farmer (Phase 2)
-    # - "NDVI for plot X dropped by 18% in the last week. Tap to view map and inspect."
-
     return alert
 
-
-# ---------------------------------------------------------------------------
 # Plot NDVI queries
-# ---------------------------------------------------------------------------
-
-
 async def get_plot_ndvi_summary(
     db: AsyncSession,
     plot_id: UUID,
     farmer_id: UUID,
 ) -> PlotNDVISummaryResponse:
-    """Get aggregated NDVI summary for a plot.
-
-    Returns latest observation, previous observation, trend, active anomalies,
-    and last 12 observations for the time-series chart.
-    """
+    """Get aggregated NDVI summary for a plot."""
     plot = await farmer_repo.get_plot_by_id(db, plot_id, include_boundary=False)
     if not plot or plot.farmer_id != farmer_id:
         raise NotFoundError("Plot", str(plot_id))
 
-    # Fetch latest + history + anomalies in parallel
     latest = await repo.get_latest_observation(db, plot_id)
     history = await repo.list_observations_by_plot(db, plot_id, limit=12)
     anomalies = await repo.get_active_anomalies_for_plot(db, plot_id)
 
-    # Determine trend
     trend = "insufficient_data"
     trend_change = None
     previous = None
@@ -302,12 +280,10 @@ async def get_plot_ndvi_summary(
         else:
             trend = "declining"
 
-    # Build response
     storage = get_storage()
     latest_resp = _to_observation_response(latest, storage) if latest else None
     previous_resp = _to_observation_response(previous, storage) if previous else None
     history_resp = [_to_observation_response(o, storage) for o in history]
-
     anomaly_resps = [_to_anomaly_response(a) for a in anomalies]
 
     return PlotNDVISummaryResponse(
@@ -340,7 +316,6 @@ async def get_plot_ndvi_history(
     observations = [_to_observation_response(o, storage) for o in history]
     latest_health = observations[0].health_category if observations else None
 
-    # Compute trend
     trend = "insufficient_data"
     if len(observations) >= 2:
         change = float(observations[0].ndvi_mean) - float(observations[1].ndvi_mean)
@@ -359,7 +334,7 @@ async def get_plot_ndvi_history(
         trend=trend,
     )
 
-
+# Manual refresh (T7: now async via Celery + outbox)
 async def refresh_plot_ndvi(
     db: AsyncSession,
     plot_id: UUID,
@@ -367,18 +342,29 @@ async def refresh_plot_ndvi(
 ) -> NDVIRefreshResponse:
     """Manually trigger NDVI refresh for a plot.
 
-    The refresh happens synchronously (not via Celery) for immediate feedback.
-    Rate-limited to once per day per plot (configurable).
+    FIX (T7): this function is now ASYNC. It does NOT run the NDVI
+    computation synchronously. Instead it:
+      1. Verifies plot ownership
+      2. Checks the 12-hour rate limit (synchronous, fast)
+      3. If refresh is needed, writes an outbox event
+      4. Returns status="queued" with task_id = outbox event ID
+
+    The actual computation runs in refresh_plot_ndvi_task (Celery).
+    The frontend polls GET /plots/{id}/ndvi/summary to see the result.
+
+    Rate-limited to once per 12 hours per plot. If the latest observation
+    is newer than 12 hours, returns status="skipped" with the existing
+    observation data (no Celery task dispatched).
     """
     plot = await farmer_repo.get_plot_by_id(db, plot_id, include_boundary=False)
     if not plot or plot.farmer_id != farmer_id:
         raise NotFoundError("Plot", str(plot_id))
 
-    # Check if a refresh was done today (rate limit)
+    # --- Check rate limit (12-hour cooldown) ---
     latest = await repo.get_latest_observation(db, plot_id)
     if latest:
         age = datetime.now(timezone.utc) - latest.observed_at
-        if age < timedelta(hours=12):
+        if age < timedelta(hours=REFRESH_COOLDOWN_HOURS):
             return NDVIRefreshResponse(
                 plot_id=plot_id,
                 status="skipped",
@@ -387,42 +373,34 @@ async def refresh_plot_ndvi(
                 health_category=classify_ndvi_health(float(latest.ndvi_mean)),
                 cloud_cover_pct=latest.cloud_cover_pct,
                 message=f"NDVI was refreshed {int(age.total_seconds() / 3600)} hours ago. "
-                f"Manual refresh is rate-limited to once per 12 hours.",
+                f"Manual refresh is rate-limited to once per {REFRESH_COOLDOWN_HOURS} hours.",
             )
 
-    # Compute NDVI
-    result = await compute_and_store_ndvi(db, plot_id)
+    # Dispatch via transactional outbox
+    # The outbox event is committed atomically with this transaction.
+    # The relay (workers.tasks.outbox_relay.drain_outbox) will pick it up
+    # within 10 seconds and dispatch refresh_plot_ndvi_task to Celery.
+    event_id = await dispatch_via_outbox(
+        db,
+        event_type="ndvi.refresh_plot",
+        payload={"plot_id": str(plot_id)},
+    )
 
-    if result.get("status") == "completed":
-        return NDVIRefreshResponse(
-            plot_id=plot_id,
-            status="completed",
-            observation_id=result.get("observation_id"),
-            ndvi_mean=result.get("ndvi_mean"),
-            health_category=result.get("health_category"),
-            cloud_cover_pct=result.get("cloud_cover_pct"),
-            message="NDVI refreshed successfully.",
-        )
-    elif result.get("status") == "skipped":
-        return NDVIRefreshResponse(
-            plot_id=plot_id,
-            status="skipped",
-            cloud_cover_pct=Decimal(str(result.get("cloud_cover_pct", 0))),
-            message="Cloud cover too high — try again later.",
-        )
-    else:
-        return NDVIRefreshResponse(
-            plot_id=plot_id,
-            status="failed",
-            message=result.get("reason", "Unknown error"),
-        )
+    logger.info(
+        "ndvi.refresh_queued",
+        plot_id=str(plot_id),
+        farmer_id=str(farmer_id),
+        outbox_event_id=str(event_id),
+    )
 
+    return NDVIRefreshResponse(
+        plot_id=plot_id,
+        status="queued",
+        message="NDVI refresh has been queued. Check back in 1-2 minutes — "
+                "poll GET /plots/{id}/ndvi/summary for the latest observation.",
+    )
 
-# ---------------------------------------------------------------------------
 # NDVI anomaly queries
-# ---------------------------------------------------------------------------
-
-
 async def get_plot_anomalies(
     db: AsyncSession,
     plot_id: UUID,
@@ -450,7 +428,6 @@ async def acknowledge_anomaly(
     from sqlalchemy import select
     from krishisetu.domains.ndvi.models import NDVIAnomalyAlert
 
-    # Fetch the alert
     result = await db.execute(
         select(NDVIAnomalyAlert).where(NDVIAnomalyAlert.id == alert_id)
     )
@@ -458,7 +435,6 @@ async def acknowledge_anomaly(
     if not alert:
         raise NotFoundError("NDVIAnomalyAlert", str(alert_id))
 
-    # Verify ownership
     if alert.farmer_id != farmer_id:
         raise NotFoundError("NDVIAnomalyAlert", str(alert_id))
 
@@ -471,29 +447,19 @@ async def acknowledge_anomaly(
     return _to_anomaly_response(updated)
 
 
-# ---------------------------------------------------------------------------
 # District heatmap (officer view)
-# ---------------------------------------------------------------------------
-
-
 async def get_district_heatmap(
     db: AsyncSession,
     *,
     state: str | None = None,
     days_back: int = 14,
 ) -> DistrictNDVIHeatmapResponse:
-    """Get NDVI heatmap aggregated by district (for officers).
-
-    Returns per-district statistics: avg NDVI, plot count, health distribution,
-    active anomaly count.
-    """
+    """Get NDVI heatmap aggregated by district (for officers)."""
     stats = await repo.get_district_ndvi_stats(db, state=state, days_back=days_back)
 
-    # Filter by state if provided
     if state:
         stats = [s for s in stats if s["state"] == state]
 
-    # Compute aggregate stats
     total_plots = sum(s["plot_count"] for s in stats)
     avg_ndvi_values = [s["avg_ndvi"] for s in stats if s["avg_ndvi"] is not None]
     overall_avg = (
@@ -504,24 +470,17 @@ async def get_district_heatmap(
 
     return DistrictNDVIHeatmapResponse(
         state=state,
-        districts=[
-            DistrictNDVIStat(**s) for s in stats
-        ],
+        districts=[DistrictNDVIStat(**s) for s in stats],
         total_plots=total_plots,
         avg_ndvi=Decimal(str(round(overall_avg, 4))) if overall_avg else None,
         generated_at=datetime.now(timezone.utc),
     )
 
-
-# ---------------------------------------------------------------------------
-# Batch refresh (Celery task entry point)
-# ---------------------------------------------------------------------------
-
-
+# Batch refresh (Celery task entry point — nightly)
 async def refresh_stale_plots(max_plots: int = MAX_PLOTS_PER_BATCH) -> dict[str, Any]:
     """Refresh NDVI for all plots with stale observations (>7 days old).
 
-    Called by Celery Beat nightly.
+    Called by Celery Beat nightly (refresh_stale_ndvi task).
     """
     from krishisetu.core.database import AsyncSessionLocal
 
@@ -574,25 +533,15 @@ async def refresh_stale_plots(max_plots: int = MAX_PLOTS_PER_BATCH) -> dict[str,
     }
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
-
-
 def _compute_bbox_from_plot(plot) -> tuple[float, float, float, float] | None:
-    """Compute bounding box (west, south, east, north) from plot boundary.
-
-    Expects plot.boundary to be a GeoJSON Polygon dict (set by repository).
-    Returns None if boundary is missing or invalid.
-    """
+    """Compute bounding box (west, south, east, north) from plot boundary."""
     boundary = getattr(plot, "boundary", None)
     if not boundary:
-        # Try centroid
         centroid = getattr(plot, "centroid", None)
         if centroid and isinstance(centroid, dict):
             lon = centroid.get("lon", 0)
             lat = centroid.get("lat", 0)
-            # Create a small bbox around centroid (~100m)
             return (lon - 0.001, lat - 0.001, lon + 0.001, lat + 0.001)
         return None
 
@@ -610,8 +559,7 @@ def _compute_bbox_from_plot(plot) -> tuple[float, float, float, float] | None:
     if not coords or not coords[0]:
         return None
 
-    # Flatten all coordinates
-    all_coords = coords[0]  # Exterior ring
+    all_coords = coords[0]
     lons = [c[0] for c in all_coords]
     lats = [c[1] for c in all_coords]
 
@@ -626,7 +574,6 @@ def _to_observation_response(
     health = classify_ndvi_health(ndvi_mean)
     is_cloudy = float(obs.cloud_cover_pct) > 30.0
 
-    # Generate pre-signed URL for raster download
     raster_url = None
     if obs.raster_url:
         try:

@@ -19,11 +19,18 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-def upgrade() > None:
+def upgrade() -> None:
     #  Enable required extensions 
-    op.execute("CREATE EXTENSION IF NOT EXISTS \"uuidossp\";")
-    op.execute("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\";")
-    op.execute("CREATE EXTENSION IF NOT EXISTS \"postgis\";")
+    op.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
+    op.execute('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
+    # PostGIS is optional — only create if available (not present on all dev installs)
+    op.execute(
+        "DO $do$ BEGIN "
+        "IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'postgis') THEN "
+        'CREATE EXTENSION IF NOT EXISTS "postgis"; '
+        "END IF; "
+        "END $do$;"
+    )
 
     #  Create schemas 
     op.execute("CREATE SCHEMA IF NOT EXISTS identity;")
@@ -110,7 +117,7 @@ def upgrade() > None:
     """)
 
 
-def downgrade() > None:
+def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS users_set_updated_at ON identity.users;")
     op.execute("DROP FUNCTION IF EXISTS identity.set_updated_at();")
     op.drop_index("idx_users_role_active", schema="identity")

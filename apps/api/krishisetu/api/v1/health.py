@@ -1,22 +1,23 @@
-"""Health check endpoints.
+"""Health check + observability endpoints.
 
-Three endpoints:
-- GET /health — liveness probe (always 200 if process is running)
-- GET /ready — readiness probe (checks DB, Redis connectivity)
-- GET /metrics — Prometheus metrics (Phase 2)
+Four endpoints:
+- GET /health         — liveness probe (always 200 if process is running)
+- GET /ready          — readiness probe (checks DB, Redis connectivity)
+- GET /metrics        — Prometheus metrics (T7: now implemented)
+- GET /integrations   — integration health (Sentinel Hub, UIDAI, etc.)
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 from pydantic import BaseModel
 
 from krishisetu.core.config import settings
 from krishisetu.core.database import check_db_connection
 from krishisetu.core.redis import check_redis_connection
+from krishisetu.core.metrics import metrics_response
 
 router = APIRouter(tags=["health"])
-
 
 class LivenessResponse(BaseModel):
     """Liveness probe response."""
@@ -24,7 +25,6 @@ class LivenessResponse(BaseModel):
     status: str
     version: str
     env: str
-
 
 class ReadinessResponse(BaseModel):
     """Readiness probe response with component health."""
@@ -70,3 +70,8 @@ async def readiness() -> ReadinessResponse:
             "redis": redis_ok,
         },
     )
+
+
+@router.get("/metrics", include_in_schema=False)
+async def prometheus_metrics() -> Response:
+    return metrics_response()
